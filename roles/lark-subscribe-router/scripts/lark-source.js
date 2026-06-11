@@ -54,6 +54,38 @@ const { spawn } = require("node:child_process");
 const { createInterface } = require("node:readline");
 const { PassThrough } = require("node:stream");
 
+// --- Shared stdin holder --------------------------------------------------
+//
+// lark-cli `event consume` exits on stdin EOF. To keep consume
+// subprocesses alive, the bridge spawns ONE `tail -f /dev/null`
+// process and shares its stdout across all lark-cli children.
+// tail produces nothing and never closes its stdout, so every
+// consumer sees an open-but-empty pipe forever (no EOF).
+//
+// Single tail per bridge (not per child) keeps the subprocess
+// count at N+1 instead of 2N.
+if (!globalThis.__larkSourceStdinHolder) {
+	const tail = spawn("tail", ["-f", "/dev/null"], {
+		stdio: ["ignore", "pipe", "ignore"],
+	});
+	tail.on("error", (err) => {
+		process.stderr.write(
+			`[lark-source] stdin holder (tail -f /dev/null) failed: ${err.message}\n`,
+		);
+		process.exit(1);
+	});
+	// If tail dies for any reason, the bridge can't keep lark-cli
+	// alive — surface the failure and exit so d-pi supervisor
+	// restarts us cleanly.
+	tail.on("exit", (code, signal) => {
+		process.stderr.write(
+			`[lark-source] stdin holder exited unexpectedly code=${code} signal=${signal}\n`,
+		);
+		process.exit(1);
+	});
+	globalThis.__larkSourceStdinHolder = tail;
+}
+
 // --- CLI arg parsing ------------------------------------------------------
 
 function parseArgs(argv) {
@@ -153,22 +185,27 @@ function spawnLarkCli(eventKey, opts) {
 
 	// lark-cli `event consume` treats stdin EOF as a shutdown signal
 	// (designed for AI subprocess callers that close stdin to signal
-	// "I'm done"). d-pi spawns the bridge with a stdin pipe it never
-	// writes to or closes; we mirror that for lark-cli by using
-	// "pipe" and NEVER calling .end() / .destroy() on the write end.
-	// The handle is unref'd so it doesn't keep the event loop alive,
-	// but it stays open as long as the bridge process exists.
+	// "I'm done"). In practice that means: any time lark-cli is
+	// spawned without a real interactive stdin (TTY, terminal,
+	// tail -f /dev/null, etc.) it sees an empty / closed pipe and
+	// exits immediately with "Error: context canceled", even if we
+	// pass --max-events. To keep lark-cli alive, every consume
+	// subprocess inherits its stdin from a long-lived `tail -f
+	// /dev/null` that the bridge owns — one tail process for the
+	// whole bridge, shared across all consume children. tail never
+	// produces data and never closes its stdout, so lark-cli reads
+	// an open-but-empty pipe forever (no EOF). On bridge shutdown
+	// the bridge kills lark-cli (SIGTERM) and the tail last.
 	//
-	// lark-cli's stderr is dropped (stdio: "ignore") because d-pi's
-	// source-manager forwards every stderr line as a "source message"
-	// to subscribed agents — lark-cli's chatty startup / heartbeat
-	// stderr would flood the router's context. The bridge's OWN
-	// stderr is used for fatal errors only (and d-pi supervisor sees
-	// those).
+	// lark-cli's stderr is set to stdio: "pipe" so the bridge can
+	// forward per-key lark-cli output (prefixed with EventKey) to
+	// the bridge's own stderr. d-pi's source-manager only forwards
+	// the bridge's stdout (JSON-RPC notifications) to subscribed
+	// agents; bridge stderr is logged to the d-pi supervisor log
+	// only. So lark-cli chatter won't flood the agent's context.
 	const child = spawn("lark-cli", args, {
-		stdio: ["pipe", "pipe", "ignore"],
+		stdio: [globalThis.__larkSourceStdinHolder.stdout, "pipe", "pipe"],
 	});
-	if (child.stdin) child.stdin.unref();
 
 	child.on("error", (err) => {
 		console.error(`[lark-source/${eventKey}] failed to spawn lark-cli: ${err.message}`);
@@ -425,12 +462,31 @@ async function main() {
 		});
 	}
 
-	// (lark-cli stderr is set to stdio: "ignore" in spawnLarkCli because
-	// d-pi's source-manager forwards every stderr line as a source
-	// message — lark-cli's chatty heartbeat / ready markers would
-	// flood the subscribed agent's context. The bridge's OWN stderr
-	// is reserved for fatal errors only, visible to the d-pi
-	// supervisor's log.)
+	// Forward each lark-cli's stderr (prefixed with EventKey) to the
+	// bridge's own stderr. lark-cli's chatter is short-lived (startup
+	// + a few heartbeats), and d-pi's source-manager logs our stderr
+	// to its supervisor log only (NOT to the subscribed agent's
+	// context — that's the fix in d-pi source-manager). The tags let
+	// us tell which lark-cli produced which line when debugging.
+	for (const { key, child } of children) {
+		if (!child.stderr) continue;
+		const tag = `[lark-source/${key}] `;
+		let carryover = "";
+		child.stderr.setEncoding("utf8");
+		child.stderr.on("data", (chunk) => {
+			const text = carryover + chunk;
+			const lines = text.split("\n");
+			carryover = lines.pop() || "";
+			for (const line of lines) {
+				process.stderr.write(tag + line + "\n");
+			}
+		});
+		child.stderr.on("end", () => {
+			if (carryover.length > 0) {
+				process.stderr.write(tag + carryover + "\n");
+			}
+		});
+	}
 
 
 	// Merge all children's stdout into one readline interface. Events
