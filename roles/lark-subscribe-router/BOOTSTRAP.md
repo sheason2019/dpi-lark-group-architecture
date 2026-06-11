@@ -3,8 +3,10 @@
 One-time setup checklist for this role. You (the router agent)
 execute every step using your tools (`bash`, `lark-cli`, d-pi CLI).
 Some steps require user input — when a step does, the guide says
-so explicitly, and you should `AskUserQuestion` or similar to
-collect the input rather than guessing.
+so explicitly. To collect that input, just **ask the user in plain
+text** (e.g. "Please paste your app_id and app_secret"). The user
+will reply in the chat; you continue once you have what you need.
+There is no AskUserQuestion tool — plain text is the only mechanism.
 
 After all five steps are checked, the role is operational: Lark
 events flow through `scripts/lark-source.js` into d-pi, you route
@@ -103,10 +105,14 @@ Bot-side calls (when `scripts/lark-source.js` runs as `--as bot`)
 use `tenant_access_token`. Requires app credentials from the Lark
 developer console.
 
-**Collect from user:** ask the user for:
-- `app_id` (from the developer console app page)
-- `app_secret` (from the same page; treat as sensitive)
-- `brand`: `feishu` or `lark` (default `lark` if the user isn't sure)
+**Ask the user (plain text):**
+
+> Please paste your Lark app credentials. I'll need:
+> 1. **app_id** — from the developer console app page
+> 2. **app_secret** — from the same page (treat as sensitive)
+> 3. **brand** — `feishu` or `lark` (default to `lark` if unsure)
+
+Wait for the reply before proceeding.
 
 **Initialize via lark-cli:**
 
@@ -155,11 +161,16 @@ Execute:
 lark-cli auth login --no-wait
 ```
 
-This prints a JSON blob including a verification URL. Show the URL
-to the user and ask them to visit it in a browser, approve, and
-copy the device_code back.
+This prints a JSON blob including a verification URL. **Show the URL
+to the user in plain text and ask:**
 
-After the user replies with the code:
+> Please visit this URL in a browser, approve the authorization, and
+> paste the device_code back here:
+> <verification-URL>
+
+Wait for the user to reply with the device_code.
+
+After the user replies:
 
 ```bash
 lark-cli auth login --device-code "$device_code"
