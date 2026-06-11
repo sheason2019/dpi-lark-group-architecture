@@ -2,40 +2,57 @@
 /**
  * Bridge: lark-cli event consume -> d-pi source JSON-RPC 2.0 notifications.
  *
- * Spawns `lark-cli event consume <EventKey>` as a subprocess, parses each
- * NDJSON event on its stdout, validates it, and emits a JSON-RPC 2.0
- * notification on this script's own stdout that d-pi's source validator
- * accepts.
+ * Spawns one `lark-cli event consume <EventKey>` subprocess per requested
+ * EventKey, parses each NDJSON event on their stdout, validates it, and
+ * emits a JSON-RPC 2.0 notification on this script's own stdout that
+ * d-pi's source validator accepts.
  *
  * Contract for d-pi sources (see packages/d-pi/src/hub/source-validator.ts):
  *   - One notification per line, terminated by '\n'
- *   - Must be a JSON-RPC 2.0 notification: has `method`, NO `id`, NO `result`/`error`
- *   - `params.mode` is optional ("next" | "steer"); missing/invalid coerces
- *     to "next" by SourceManager
+ *   - Must be a JSON-RPC 2.0 notification: has `method`, NO `id`,
+ *     NO `result`/`error`
+ *   - `params.mode` is optional ("next" | "steer"); missing/invalid
+ *     coerces to "next" by SourceManager. We always set it explicitly
+ *     to "steer" for Lark messages.
  *
  * Contract for lark-cli event consume (see lark-event skill):
  *   - NDJSON, one Lark event per line on stdout
- *   - Stderr carries informational messages (e.g. "ready" markers); we
- *     pass these through unchanged so d-pi's source supervisor can see
- *     them, but they MUST NOT bleed into stdout.
+ *   - Stderr carries informational messages (e.g. "ready" markers);
+ *     we prefix them with the EventKey and pass through unchanged so
+ *     d-pi's source supervisor can see them. They MUST NOT bleed
+ *     into stdout.
  *
  * Usage:
- *   lark-source.js <EventKey> [--as user|bot|auto] [--max-events N] [--timeout D] [--quiet]
+ *   lark-source.js [--event-key <EventKey>]... [--as user|bot|auto]
+ *                 [--max-events N] [--timeout D] [--quiet] [-p key=value ...]
  *
- * Example (register as a d-pi source):
+ * Examples:
+ *   # Single key (positional still supported for ergonomics)
+ *   lark-source.js im.message.receive_v1 --as bot
+ *
+ *   # Multiple keys, multi-flag form
+ *   lark-source.js --event-key im.message.receive_v1 \
+ *                   --event-key im.message.reaction.created_v1 \
+ *                   --as bot
+ *
+ *   # Register as a d-pi source
  *   command: "node"
- *   args:    ["/abs/path/to/lark-source.js", "im.message.receive_v1", "--as", "bot"]
+ *   args: ["/abs/path/to/lark-source.js",
+ *          "--event-key", "im.message.receive_v1",
+ *          "--as", "bot"]
  *
  * Exit codes:
- *   0  - lark-cli exited cleanly (e.g. --timeout reached, --max-events hit)
+ *   0  - all lark-cli subprocesses exited cleanly (timeout / max-events)
  *   1  - bridge-level error (bad CLI args, lark-cli spawn failed)
- *   2  - lark-cli exited with non-zero code (d-pi source supervisor restarts)
+ *   2  - at least one lark-cli subprocess exited non-zero (d-pi source
+ *       supervisor will restart)
  */
 
 "use strict";
 
 const { spawn } = require("node:child_process");
 const { createInterface } = require("node:readline");
+const { PassThrough } = require("node:stream");
 
 // --- CLI arg parsing ------------------------------------------------------
 
@@ -47,7 +64,7 @@ function parseArgs(argv) {
 	}
 
 	const opts = {
-		eventKey: args[0],
+		eventKeys: [],
 		as: "auto",
 		maxEvents: undefined,
 		timeout: undefined,
@@ -55,9 +72,13 @@ function parseArgs(argv) {
 		extraParams: [],
 	};
 
-	for (let i = 1; i < args.length; i++) {
+	for (let i = 0; i < args.length; i++) {
 		const a = args[i];
 		switch (a) {
+			case "--event-key":
+			case "-e":
+				opts.eventKeys.push(args[++i]);
+				break;
 			case "--as":
 				opts.as = args[++i];
 				if (!["user", "bot", "auto"].includes(opts.as)) {
@@ -79,14 +100,20 @@ function parseArgs(argv) {
 				opts.extraParams.push(args[++i]);
 				break;
 			default:
+				// Backward-compat: first positional arg is an EventKey.
+				if (i === 0 && !a.startsWith("-")) {
+					opts.eventKeys.push(a);
+					break;
+				}
 				console.error(`[lark-source] unknown arg: ${a}`);
 				printUsage();
 				process.exit(1);
 		}
 	}
 
-	if (!opts.eventKey) {
-		console.error("[lark-source] missing required <EventKey>");
+	if (opts.eventKeys.length === 0) {
+		console.error("[lark-source] at least one --event-key (or positional EventKey) required");
+		printUsage();
 		process.exit(1);
 	}
 
@@ -94,32 +121,33 @@ function parseArgs(argv) {
 }
 
 function printUsage() {
-	process.stderr.write(`Usage: lark-source.js <EventKey> [--as user|bot|auto]
+	process.stderr.write(`Usage: lark-source.js [--event-key <EventKey>]... [--as user|bot|auto]
                      [--max-events N] [--timeout D] [--quiet]
                      [-p key=value ...]
 
-Bridges lark-cli event consume <EventKey> to d-pi source JSON-RPC
-notifications on stdout. Pass lark-cli stderr through unchanged.
+Bridges one or more lark-cli event consume streams to d-pi source
+JSON-RPC notifications on stdout. Pass lark-cli stderr through
+unchanged (prefixed with the EventKey).
+
+First positional arg is treated as an EventKey for backward compat.
 `);
 }
 
 // --- lark-cli spawn -------------------------------------------------------
 
-function spawnLarkCli(opts) {
-	const args = ["event", "consume", opts.eventKey, "--as", opts.as];
+function spawnLarkCli(eventKey, opts) {
+	const args = ["event", "consume", eventKey, "--as", opts.as];
 	if (opts.maxEvents !== undefined) args.push("--max-events", String(opts.maxEvents));
 	if (opts.timeout !== undefined) args.push("--timeout", opts.timeout);
 	if (opts.quiet) args.push("--quiet");
 	for (const p of opts.extraParams) args.push("--param", p);
 
-	// We rely on the lark-event skill's stderr "ready" marker contract
-	// (AI should NOT pass --quiet here because it silences the marker).
-	// This script defaults to NOT passing --quiet for that reason.
-
-	const child = spawn("lark-cli", args, { stdio: ["ignore", "pipe", "pipe"] });
+	const child = spawn("lark-cli", args, {
+		stdio: ["ignore", "pipe", "pipe"],
+	});
 
 	child.on("error", (err) => {
-		console.error(`[lark-source] failed to spawn lark-cli: ${err.message}`);
+		console.error(`[lark-source/${eventKey}] failed to spawn lark-cli: ${err.message}`);
 		process.exit(1);
 	});
 
@@ -132,13 +160,14 @@ function spawnLarkCli(opts) {
  * Decide if a Lark event is valid and worth forwarding. Returns the
  * validation reason string if rejected, or null if accepted.
  *
- * Validation rules:
+ * Validation rules (must-have Lark fields, no semantic filtering):
  *   1. Must have `type` (event key, e.g. "im.message.receive_v1")
  *   2. Must have `chat_id` (oc_xxx)
- *   3. Must have `message_id` (om_xxx) — unless the event type is
- *      something that legitimately has no message (e.g. chat member
- *      change). For now we require message_id; loosen per-type later.
- *   4. Must have `sender_id` (ou_xxx) — same reasoning.
+ *   3. Must have `message_id` (om_xxx)
+ *   4. Must have `sender_id` (ou_xxx)
+ *
+ * The bridge does NOT filter by `message_type`, content, sender, etc.
+ * — the router agent decides what to do with each event.
  */
 function validateEvent(event) {
 	if (!event || typeof event !== "object") return "not an object";
@@ -166,19 +195,20 @@ function validateEvent(event) {
  *     "type": <event.type>,             // pass-through for downstream
  *     "id":   <event.event_id>,         // global dedup key
  *     "data": <entire original event>,  // full payload preserved
- *     "mode": "next"                    // default routing
+ *     "mode": "steer"                   // Lark = real-time user input
  *   }
  *
- * Mode is "next" (queue at agent's next turn) by default. To make a
- * specific event type urgent ("steer" — interrupt), fork this script
- * and override the `mode` field below.
+ * Mode is "steer" (interrupt the agent's current turn and inject
+ * immediately). Lark messages are real-time user-facing input — the
+ * user is actively waiting for a response, so we mirror the TUI's
+ * Ctrl+Enter semantics rather than the Enter (queue) semantics.
  */
 function toNotification(event) {
 	const params = {
 		type: event.type,
-		id: event.event_id ?? event.message_id, // event_id preferred; fall back to message_id
+		id: event.event_id ?? event.message_id,
 		data: event,
-		mode: "next",
+		mode: "steer",
 	};
 	return {
 		jsonrpc: "2.0",
@@ -191,42 +221,87 @@ function toNotification(event) {
 
 function main() {
 	const opts = parseArgs(process.argv);
-	const child = spawnLarkCli(opts);
 
-	// Let this script exit when lark-cli exits, with the same code.
-	// d-pi's source supervisor will restart on non-zero exit, so any
-	// abnormal exit from lark-cli will be recovered automatically.
-	let childExitCode = null;
-	child.on("exit", (code, signal) => {
-		childExitCode = code !== null ? code : signal === "SIGTERM" ? 0 : 1;
-		// Give the stdout stream a tick to flush, then exit.
-		process.exit(childExitCode);
-	});
+	// Spawn one lark-cli per EventKey.
+	const children = opts.eventKeys.map((key) => ({
+		key,
+		child: spawnLarkCli(key, opts),
+	}));
 
-	// Forward SIGINT/SIGTERM to lark-cli so it can shut down cleanly.
-	for (const sig of ["SIGINT", "SIGTERM"]) {
-		process.on(sig, () => {
-			try {
-				child.kill(sig);
-			} catch {
-				// already dead
+	// Track exit codes per child; bridge exits when all have exited.
+	const exitCodes = new Map(); // key -> code
+	let exited = 0;
+
+	for (const { key, child } of children) {
+		child.on("exit", (code, signal) => {
+			const ec = code !== null ? code : signal === "SIGTERM" ? 0 : 1;
+			exitCodes.set(key, ec);
+			exited++;
+			console.error(
+				`[lark-source/${key}] lark-cli exited code=${code} signal=${signal}`,
+			);
+			if (exited === children.length) {
+				// Pick the worst exit code: first non-zero wins; else 0.
+				let final = 0;
+				for (const v of exitCodes.values()) {
+					if (v !== 0) {
+						final = v;
+						break;
+					}
+				}
+				// Flush stdout, then exit.
+				process.exit(final || 0);
 			}
 		});
 	}
 
-	// Mirror lark-cli stderr to our stderr so d-pi's source supervisor
-	// can log it. This MUST stay separate from stdout to preserve
-	// JSON-RPC output purity.
-	child.stderr.pipe(process.stderr);
+	// Forward SIGINT/SIGTERM to all lark-cli subprocesses.
+	for (const sig of ["SIGINT", "SIGTERM"]) {
+		process.on(sig, () => {
+			for (const { child } of children) {
+				try {
+					child.kill(sig);
+				} catch {
+					// already dead
+				}
+			}
+		});
+	}
 
-	// Read lark-cli stdout line-by-line and emit one JSON-RPC notification
-	// per accepted event. Malformed lines are logged to stderr and
-	// skipped — they don't crash the bridge.
-	const rl = createInterface({ input: child.stdout, crlfDelay: Infinity });
+	// Tag each child's stderr with its EventKey and forward to our
+	// stderr. Stderr MUST NOT mix with stdout (preserves JSON purity).
+	for (const { key, child } of children) {
+		const tag = `[lark-source/${key}] `;
+		let carryover = "";
+		child.stderr.on("data", (chunk) => {
+			const text = carryover + chunk.toString("utf8");
+			const lines = text.split("\n");
+			carryover = lines.pop(); // last fragment may be incomplete
+			for (const line of lines) {
+				process.stderr.write(tag + line + "\n");
+			}
+		});
+		child.stderr.on("end", () => {
+			if (carryover.length > 0) {
+				process.stderr.write(tag + carryover + "\n");
+			}
+		});
+	}
+
+	// Merge all children's stdout into one readline interface. Events
+	// from different EventKeys interleave on this single line stream;
+	// the JSON-RPC envelope includes params.type so consumers can
+	// distinguish them.
+	const mergedStdout = new PassThrough();
+	for (const { child } of children) {
+		child.stdout.pipe(mergedStdout);
+	}
+
+	const rl = createInterface({ input: mergedStdout, crlfDelay: Infinity });
 
 	let emitted = 0;
 	let skipped = 0;
-	const onLine = (line) => {
+	rl.on("line", (line) => {
 		if (line.length === 0) return;
 		let event;
 		try {
@@ -247,13 +322,10 @@ function main() {
 		const notification = toNotification(event);
 		process.stdout.write(JSON.stringify(notification) + "\n");
 		emitted++;
-	};
-	rl.on("line", onLine);
+	});
 	rl.on("close", () => {
-		// lark-cli stdout closed; exit handler will fire too, but if
-		// we reach here before lark-cli's exit event, exit cleanly.
 		console.error(
-			`[lark-source] done. emitted=${emitted} skipped=${skipped} exit=${childExitCode}`,
+			`[lark-source] done. emitted=${emitted} skipped=${skipped}`,
 		);
 	});
 }
