@@ -33,8 +33,10 @@ unless re-bootstrap is requested.
 | 3 | Bot identity configured (app_id, app_secret) | **yes** — ask user |
 | 4 | Current user authenticated via device flow | **yes** — ask user to visit URL |
 | 5 | Current user bound as agent group admin | no (uses step 3+4 output) |
+| 6 | Bridge registered as a d-pi source | no (uses step 1+3 output) |
+| 7 | End-to-end Lark → d-pi → Lark verified | yes (user sends a real Lark msg) |
 
-When all five are checked, mark bootstrap done and proceed to
+When all seven are checked, mark bootstrap done and proceed to
 runtime.
 
 ---
@@ -259,7 +261,84 @@ Note: `d-pi users create` writes to `~/.d-pi/users/<name>.json` (global).
 
 ---
 
-## Step 6 — Verify end-to-end
+## Step 6 — Register the bridge as a d-pi source
+
+After step 4 (user auth) succeeds, register
+`scripts/lark-source.js` as a d-pi source so Lark events actually
+flow into the workspace. The bridge spawns `lark-cli event consume`
+subprocesses (one per EventKey) and converts their NDJSON output to
+JSON-RPC 2.0 notifications on its own stdout.
+
+Use the `create_source` tool (you have it as part of the d-pi
+built-in extension). No `--event-key` is specified — the bridge
+dynamically queries `lark-cli event list --json` at startup to
+discover every EventKey the app has registered, and subscribes to
+all of them.
+
+**Tool call:**
+
+```
+create_source(
+  name   = "lark-bot"
+  command = "node"
+  args = [
+    "/abs/path/to/roles/lark-subscribe-router/scripts/lark-source.js",
+    "--as", "bot"
+  ]
+)
+```
+
+(use the absolute path to the script in this workspace.)
+
+On success you should see `Source "lark-bot" created and running.`
+and you're auto-subscribed to it (per the tool contract). The hub
+spawns the bridge subprocess, which in turn spawns one `lark-cli
+event consume` per EventKey. All stderr from the bridge and its
+lark-cli children is forwarded to your context.
+
+If you want to subscribe to only a subset of events (e.g. only
+message events, no reactions), pass them explicitly:
+
+```
+create_source(
+  name   = "lark-bot"
+  command = "node"
+  args = [
+    "/abs/path/to/roles/lark-subscribe-router/scripts/lark-source.js",
+    "--event-key", "im.message.receive_v1",
+    "--event-key", "im.chat.member.user.added_v1",
+    "--as", "bot"
+  ]
+)
+```
+
+Verify:
+
+```
+list_sources()
+# expect: sources = [{ name: "lark-bot", command: "node",
+#   args: [...], status: "running", subscriberCount: 1 }]
+```
+
+Also check the bridge's stderr — you should see lines like:
+
+```
+[lark-source] No --event-key specified; querying `lark-cli event list --json` to discover all registered events...
+[lark-source] Discovered 11 EventKey(s) to subscribe:
+[lark-source]   - im.message.receive_v1
+[lark-source]   - im.message.reaction.created_v1
+[lark-source]   - ... (etc.)
+[lark-source/im.message.receive_v1] [ready] im.message.receive_v1
+[lark-source/im.message.reaction.created_v1] [ready] im.message.reaction.created_v1
+[lark-source/...] [ready] ...
+```
+
+The `[ready]` lines come from `lark-cli event consume` (see the
+lark-event skill's subprocess contract). One per EventKey.
+
+---
+
+## Step 7 — Verify end-to-end
 
 Send a real Lark message to the bot (the user does this):
 

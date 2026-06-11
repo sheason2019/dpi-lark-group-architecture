@@ -34,15 +34,17 @@ mixes with stdout.
 ### Usage
 
 ```bash
-# Single EventKey (positional for ergonomics)
-node lark-source.js im.message.receive_v1 --as bot
+# Default: subscribe to ALL events the app has registered
+# (queries `lark-cli event list --json` at startup)
+node lark-source.js --as bot
 
-# Multiple EventKeys via repeated flag
-node lark-source.js \
-  --event-key im.message.receive_v1 \
-  --event-key im.message.reaction.created_v1 \
-  --event-key im.message.reaction.deleted_v1 \
-  --as bot
+# Subscribe to specific events only
+node lark-source.js --event-key im.message.receive_v1 \
+                    --event-key im.message.reaction.created_v1 \
+                    --as bot
+
+# Backward-compat: single EventKey as positional arg
+node lark-source.js im.message.receive_v1 --as bot
 
 # Bounded run (CI / smoke testing)
 node lark-source.js im.message.receive_v1 --max-events 1 --timeout 30s
@@ -52,14 +54,34 @@ node lark-source.js im.message.receive_v1 --max-events 1 --timeout 30s
 
 | Flag | Default | Description |
 |---|---|---|
-| `--event-key`, `-e` | (required, ≥1) | EventKey to subscribe to. Repeatable for multiple keys. First positional arg also accepted as EventKey for ergonomics. |
-| `--as user\|bot\|auto` | `auto` | Identity passed through to lark-cli. |
+| `--event-key`, `-e` | dynamic discovery | EventKey to subscribe to. Repeatable for multiple keys. First positional arg also accepted as EventKey for ergonomics. If none given, runs `lark-cli event list --json` at startup and subscribes to everything the app has registered. |
+| `--as user\|bot\|auto` | `auto` | Identity passed through to lark-cli. For the bridge, `bot` is the typical choice since Lark delivers events to the bot identity. |
 | `--max-events N` | unlimited | Exit after N events received. |
 | `--timeout D` | no timeout | Exit after duration D (e.g. `30s`, `2m`). |
 | `--quiet` | off | Pass through to lark-cli. NOT recommended — silences the `ready` marker that the lark-event skill expects. |
 | `-p key=value`, `--param key=value` | none | Pass through to lark-cli. Repeatable. |
 
+### EventKey resolution (in order)
+
+1. All `--event-key` flags → use exactly those
+2. First positional arg (backward compat) → treat as EventKey
+3. NONE of the above → spawn `lark-cli event list --json`, parse,
+   subscribe to every EventKey the app has registered
+
 ### Register as a d-pi source
+
+The typical (recommended) call — subscribe to all events the app
+has registered:
+
+```ts
+create_source({
+  name: "lark-bot",
+  command: "node",
+  args: ["/abs/path/to/lark-source.js", "--as", "bot"],
+})
+```
+
+If you want to subscribe to only specific events (skip reactions, etc.):
 
 ```ts
 create_source({
@@ -67,7 +89,6 @@ create_source({
   command: "node",
   args: ["/abs/path/to/lark-source.js",
          "--event-key", "im.message.receive_v1",
-         "--event-key", "im.message.reaction.created_v1",
          "--as", "bot"],
 })
 ```
@@ -78,10 +99,10 @@ Then subscribe the router agent:
 subscribe_source({ source_name: "lark-bot" })
 ```
 
-Multiple EventKeys collapse into one d-pi source (single child
-process, single meta header `sourceName="lark-bot"`, multiplexed
-events). The router agent distinguishes events by `params.type`
-inside each notification.
+The bridge multiplexes events from multiple EventKeys onto one d-pi
+source (single child process, single meta header
+`sourceName="lark-bot"`). The router agent distinguishes events by
+`params.type` inside each notification.
 
 ### Validation rules (noise filter only — NOT event filter)
 
@@ -118,7 +139,9 @@ response, so we mirror TUI Ctrl+Enter (interrupt) rather than Enter
 
 ### Exit / restart semantics
 
-- One lark-cli subprocess per `--event-key`.
+- One lark-cli subprocess per EventKey (queried from
+  `lark-cli event list --json` when no `--event-key` is given, or
+  taken from `--event-key` flags).
 - Bridge exits when all subprocesses have exited.
 - Final exit code: first non-zero among subprocesses, or 0 if all
   clean.

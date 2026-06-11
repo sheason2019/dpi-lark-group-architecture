@@ -111,12 +111,9 @@ function parseArgs(argv) {
 		}
 	}
 
-	if (opts.eventKeys.length === 0) {
-		console.error("[lark-source] at least one --event-key (or positional EventKey) required");
-		printUsage();
-		process.exit(1);
-	}
-
+	// No --event-key is NOT an error: main() will fall through to
+	// dynamic discovery via `lark-cli event list --json`. See
+	// listAvailableEventKeys() below.
 	return opts;
 }
 
@@ -129,7 +126,19 @@ Bridges one or more lark-cli event consume streams to d-pi source
 JSON-RPC notifications on stdout. Pass lark-cli stderr through
 unchanged (prefixed with the EventKey).
 
-First positional arg is treated as an EventKey for backward compat.
+EventKey resolution (in order):
+  1. All --event-key flags (repeatable) → use exactly those
+  2. First positional arg (backward compat) → treat as EventKey
+  3. NONE of the above → query 'lark-cli event list --json' and
+     subscribe to everything the app has registered
+
+Example (typical: subscribe to everything the app registered):
+  lark-source.js --as bot
+
+Example (subscribe to specific events only):
+  lark-source.js --event-key im.message.receive_v1 \
+                  --event-key im.message.reaction.created_v1 \
+                  --as bot
 `);
 }
 
@@ -152,6 +161,90 @@ function spawnLarkCli(eventKey, opts) {
 	});
 
 	return child;
+}
+
+// --- Dynamic EventKey discovery ------------------------------------------
+
+/**
+ * Query `lark-cli event list --json` to discover all EventKeys the
+ * current app identity has registered. Spawns one short-lived lark-cli
+ * subprocess, parses its stdout.
+ *
+ * Returns: array of EventKey strings, or rejects with an Error.
+ *
+ * Tolerated output shapes:
+ *   - top-level array:               ["im.message.receive_v1", ...]
+ *   - {events: [...]}                (lark-cli --json wraps in `events`)
+ *   - {data: [...]}                  (OAPI shape)
+ *   - {EventKeys: [...]}             (alternative capitalisation)
+ *   - array of objects with `key` or `eventKey` field
+ */
+function listAvailableEventKeys(opts) {
+	return new Promise((resolve, reject) => {
+		const child = spawn(
+			"lark-cli",
+			["event", "list", "--json", "--as", opts.as],
+			{ stdio: ["ignore", "pipe", "pipe"] },
+		);
+		let stdout = "";
+		let stderr = "";
+		child.stdout.on("data", (chunk) => {
+			stdout += chunk.toString("utf8");
+		});
+		child.stderr.on("data", (chunk) => {
+			stderr += chunk.toString("utf8");
+			// pass list stderr through too (ready markers etc.)
+			process.stderr.write(`[lark-source/list] ${chunk}`);
+		});
+		child.on("error", (err) => {
+			reject(new Error(`failed to spawn lark-cli event list: ${err.message}`));
+		});
+		child.on("exit", (code) => {
+			if (code !== 0) {
+				reject(
+					new Error(
+						`lark-cli event list exited ${code}: ${stderr.slice(0, 300)}`,
+					),
+				);
+				return;
+			}
+			let parsed;
+			try {
+				parsed = JSON.parse(stdout);
+			} catch (err) {
+				reject(
+					new Error(`lark-cli event list returned invalid JSON: ${err.message}`),
+				);
+				return;
+			}
+			const arr = Array.isArray(parsed)
+				? parsed
+				: parsed.events || parsed.data || parsed.EventKeys || [];
+			if (!Array.isArray(arr)) {
+				reject(
+					new Error(
+						`lark-cli event list JSON shape not recognised (expected array or {events,data,EventKeys})`,
+					),
+				);
+				return;
+			}
+			const keys = arr
+				.map((item) =>
+					typeof item === "string"
+						? item
+						: item?.key ?? item?.eventKey ?? item?.event_key ?? item?.name,
+				)
+				.filter((k) => typeof k === "string" && k.length > 0);
+			if (keys.length === 0) {
+				reject(
+					new Error(`lark-cli event list returned zero EventKeys — app may have none registered`),
+				);
+				return;
+			}
+			// Dedupe (lark-cli list should be unique, but defensive)
+			resolve([...new Set(keys)]);
+		});
+	});
 }
 
 // --- Event validation -----------------------------------------------------
@@ -222,11 +315,37 @@ function toNotification(event) {
 
 // --- Main -----------------------------------------------------------------
 
-function main() {
+async function main() {
 	const opts = parseArgs(process.argv);
 
+	// Resolve EventKeys. If --event-key / positional were given, use
+	// those. Otherwise, dynamically discover via `lark-cli event list`
+	// (this is the typical chat-bot case: subscribe to every event the
+	// app has registered in the developer console).
+	let eventKeys = opts.eventKeys;
+	if (eventKeys.length === 0) {
+		process.stderr.write(
+			"[lark-source] No --event-key specified; querying `lark-cli event list --json` to discover all registered events...\n",
+		);
+		try {
+			eventKeys = await listAvailableEventKeys(opts);
+		} catch (err) {
+			process.stderr.write(
+				`[lark-source] Failed to discover EventKeys: ${err.message}\n` +
+					`[lark-source] Hint: pass --event-key <Key> explicitly, or fix the underlying lark-cli error above.\n`,
+			);
+			process.exit(1);
+		}
+		process.stderr.write(
+			`[lark-source] Discovered ${eventKeys.length} EventKey(s) to subscribe:\n`,
+		);
+		for (const k of eventKeys) {
+			process.stderr.write(`[lark-source]   - ${k}\n`);
+		}
+	}
+
 	// Spawn one lark-cli per EventKey.
-	const children = opts.eventKeys.map((key) => ({
+	const children = eventKeys.map((key) => ({
 		key,
 		child: spawnLarkCli(key, opts),
 	}));
@@ -333,4 +452,7 @@ function main() {
 	});
 }
 
-main();
+main().catch((err) => {
+	process.stderr.write(`[lark-source] fatal: ${err.message}\n${err.stack}\n`);
+	process.exit(1);
+});
