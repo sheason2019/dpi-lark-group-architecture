@@ -83,17 +83,31 @@ process, single meta header `sourceName="lark-bot"`, multiplexed
 events). The router agent distinguishes events by `params.type`
 inside each notification.
 
-### Validation rules (no semantic filtering)
+### Validation rules (noise filter only — NOT event filter)
 
-The bridge accepts every Lark event that has all required fields. It
-does NOT filter by `message_type`, content, sender, chat, etc. — the
-router agent decides what to do with each event.
+This bridge is a **protocol converter**, not an event filter. Every
+valid Lark event passes through verbatim, regardless of type,
+schema, or what fields it has. The validation here exists only to
+skip lark-cli stdout noise lines that aren't events at all.
 
-Required fields (event is skipped + logged to stderr if missing):
-- `type` (string)
-- `chat_id` (oc_xxx)
-- `message_id` (om_xxx)
-- `sender_id` (ou_xxx)
+Rejected (logged to stderr):
+- Not valid JSON
+- Valid JSON but missing `type` field (i.e. not a Lark event)
+
+Accepted (passed through as-is, including events with no
+chat_id / message_id / sender_id):
+- `im.message.receive_v1` — IM messages
+- `im.message.reaction.created_v1` / `deleted_v1` — reactions (no
+  chat_id / sender_id)
+- `im.chat.member.added_v1` / `removed_v1` — chat membership
+  (no message_id)
+- `calendar.event.created_v1` — calendar events (totally different
+  schema)
+- `task.task.created_v1` etc. — any other Lark event type
+
+If you need to filter by event kind (e.g. only forward IM messages,
+not reactions), do that in the **router agent** by checking
+`params.data.type` — not in this bridge.
 
 ### Mode = "steer" (always)
 

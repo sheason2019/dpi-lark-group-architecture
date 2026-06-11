@@ -157,29 +157,27 @@ function spawnLarkCli(eventKey, opts) {
 // --- Event validation -----------------------------------------------------
 
 /**
- * Decide if a Lark event is valid and worth forwarding. Returns the
- * validation reason string if rejected, or null if accepted.
+ * Decide if a line from lark-cli stdout is a Lark event worth forwarding.
+ * Returns the rejection reason string, or null if accepted.
  *
- * Validation rules (must-have Lark fields, no semantic filtering):
- *   1. Must have `type` (event key, e.g. "im.message.receive_v1")
- *   2. Must have `chat_id` (oc_xxx)
- *   3. Must have `message_id` (om_xxx)
- *   4. Must have `sender_id` (ou_xxx)
+ * PHILOSOPHY: this bridge is a protocol converter (Lark NDJSON → d-pi
+ * JSON-RPC), NOT a filter. All Lark events pass through as-is. We only
+ * reject lines that are clearly noise / not events:
+ *   1. Not a JSON object
+ *   2. Missing `type` (every Lark event has a type identifier like
+ *      "im.message.receive_v1" or "im.chat.member.added_v1")
  *
- * The bridge does NOT filter by `message_type`, content, sender, etc.
- * — the router agent decides what to do with each event.
+ * We do NOT check chat_id, message_id, sender_id, etc. — events like
+ * "im.chat.member.added_v1" legitimately have no message_id, and the
+ * router agent is responsible for deciding what to do with each event.
+ *
+ * Filtering by event KIND (only messages, no reactions) is the router
+ * agent's job, not the bridge's.
  */
 function validateEvent(event) {
 	if (!event || typeof event !== "object") return "not an object";
-	if (typeof event.type !== "string" || event.type.length === 0) return "missing type";
-	if (typeof event.chat_id !== "string" || !event.chat_id.startsWith("oc_")) {
-		return "missing or invalid chat_id";
-	}
-	if (typeof event.message_id !== "string" || !event.message_id.startsWith("om_")) {
-		return "missing or invalid message_id";
-	}
-	if (typeof event.sender_id !== "string" || !event.sender_id.startsWith("ou_")) {
-		return "missing or invalid sender_id";
+	if (typeof event.type !== "string" || event.type.length === 0) {
+		return "missing or non-string type (not a Lark event)";
 	}
 	return null;
 }
@@ -193,23 +191,28 @@ function validateEvent(event) {
  * The notification's `params` shape:
  *   {
  *     "type": <event.type>,             // pass-through for downstream
- *     "id":   <event.event_id>,         // global dedup key
- *     "data": <entire original event>,  // full payload preserved
+ *     "id":   <event.event_id>,         // global dedup key (when present)
+ *     "data": <entire original event>,  // FULL payload, as-is
  *     "mode": "steer"                   // Lark = real-time user input
  *   }
  *
- * Mode is "steer" (interrupt the agent's current turn and inject
- * immediately). Lark messages are real-time user-facing input — the
- * user is actively waiting for a response, so we mirror the TUI's
- * Ctrl+Enter semantics rather than the Enter (queue) semantics.
+ * - `data` is the entire Lark event verbatim. The bridge does NOT
+ *   transform event content; the router agent reads `data.type` and
+ *   other fields directly.
+ * - `id` is included when the event has any of `event_id`, `message_id`,
+ *   `id` (some events use a generic `id` field). Omitted when none
+ *   are present.
+ * - `mode: "steer"` because Lark is real-time user-facing input;
+ *   mirror TUI Ctrl+Enter (interrupt) rather than Enter (queue).
  */
 function toNotification(event) {
 	const params = {
 		type: event.type,
-		id: event.event_id ?? event.message_id,
 		data: event,
 		mode: "steer",
 	};
+	const id = event.event_id ?? event.message_id ?? event.id;
+	if (id !== undefined) params.id = id;
 	return {
 		jsonrpc: "2.0",
 		method: "events.emit",
