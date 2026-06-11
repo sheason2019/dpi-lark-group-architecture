@@ -371,26 +371,43 @@ async function main() {
 	// Track exit codes per child; bridge exits when all have exited.
 	const exitCodes = new Map(); // key -> code
 	let exited = 0;
+	let anyClean = false; // at least one child exited 0 (success)
 
 	for (const { key, child } of children) {
 		child.on("exit", (code, signal) => {
 			const ec = code !== null ? code : signal === "SIGTERM" ? 0 : 1;
 			exitCodes.set(key, ec);
 			exited++;
+			if (ec === 0) anyClean = true;
 			console.error(
 				`[lark-source/${key}] lark-cli exited code=${code} signal=${signal}`,
 			);
 			if (exited === children.length) {
-				// Pick the worst exit code: first non-zero wins; else 0.
+				// Final exit code policy: the bridge is healthy if AT
+				// LEAST ONE child ran cleanly (i.e. we proved the
+				// lark-cli / Lark connection works). lark-cli can
+				// refuse to subscribe to EventKeys the app hasn't
+				// enabled in the developer console — that's a server
+				// validation/auth error in the lark-cli output, NOT
+				// a bridge bug. Propagating the worst code would
+				// cause d-pi's supervisor to keep restarting the
+				// bridge in a loop, flooding the agent with
+				// "restarting" logs.
+				//
+				// If ALL children failed (no event ever made it
+				// through), propagate the worst non-zero code so
+				// d-pi surfaces a real error.
 				let final = 0;
-				for (const v of exitCodes.values()) {
-					if (v !== 0) {
-						final = v;
-						break;
+				if (!anyClean) {
+					for (const v of exitCodes.values()) {
+						if (v !== 0) {
+							final = v;
+							break;
+						}
 					}
 				}
 				// Flush stdout, then exit.
-				process.exit(final || 0);
+				process.exit(final);
 			}
 		});
 	}
