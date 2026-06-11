@@ -1,269 +1,314 @@
 # BOOTSTRAP — lark-subscribe-router
 
-One-time setup checklist for this role. Run once per deployment.
-After completion the role is operational and the router agent can
-handle live Lark traffic.
+One-time setup checklist for this role. You (the router agent)
+execute every step using your tools (`bash`, `lark-cli`, d-pi CLI).
+Some steps require user input — when a step does, the guide says
+so explicitly, and you should `AskUserQuestion` or similar to
+collect the input rather than guessing.
 
-This file is NOT loaded as agent context at runtime (unlike
-`AGENTS.md`). It is a procedural guide for the human deployer
-and for the agent itself when verifying / re-bootstrapping.
+After all five steps are checked, the role is operational: Lark
+events flow through `scripts/lark-source.js` into d-pi, you route
+them, and you reply to the user via `lark-im`.
+
+This file is NOT loaded into your runtime context by default (unlike
+`AGENTS.md`). Read it when:
+- The agent group's `agent.json` (or equivalent) shows bootstrap has
+  not been run (e.g. no `allow-user` for the current Lark user, or
+  no Lark skills in `roles/lark-subscribe-router/skills/`)
+- The human explicitly says "bootstrap the Lark router"
+- This is your first turn after a fresh deployment
+
+Do NOT re-run completed steps on every agent start. After bootstrap
+succeeds, mark it done in the workspace state and skip this file
+unless re-bootstrap is requested.
 
 ## Status checklist
 
-| # | Step | Who | Status |
-|---|---|---|---|
-| 1 | Lark skills installed into `roles/lark-subscribe-router/skills/` | human / setup script | ☐ |
-| 2 | `lark-cli` binary on PATH | human / setup script | ☐ |
-| 3 | Bot identity configured (app_id, app_secret) | human / setup script | ☐ |
-| 4 | Current user authenticated via device flow | human (browser) | ☐ |
-| 5 | Current user bound as agent group admin | agent | ☐ |
+| # | Step | Requires user input? |
+|---|---|---|
+| 1 | Lark skills installed in `roles/lark-subscribe-router/skills/` | no |
+| 2 | `lark-cli` binary installed and on PATH | no |
+| 3 | Bot identity configured (app_id, app_secret) | **yes** — ask user |
+| 4 | Current user authenticated via device flow | **yes** — ask user to visit URL |
+| 5 | Current user bound as agent group admin | no (uses step 3+4 output) |
 
-When all five are checked, the role is ready.
+When all five are checked, mark bootstrap done and proceed to
+runtime.
 
 ---
 
-## §1 — Prerequisites (human / setup script runs these)
-
-Steps 1.1–1.4 require interactive input, browser access, or
-system-level installs. They are NOT done by the agent at runtime.
-
-### 1.1 Install lark skills into this role's skills/ directory
+## Step 1 — Install lark-cli skills into this role's skills/
 
 The 21 lark-* skills MUST live under
 `roles/lark-subscribe-router/skills/` so that d-pi's
 `collectGroupArchitectureContext` picks them up as role-scoped
-skills (`packages/dpi/src/workspace/workspace.ts:collectGroupArchitectureContext`).
+skills (`packages/d-pi/src/workspace/workspace.ts:collectGroupArchitectureContext`).
 
-`npx skills add` installs to `~/.agents/skills/` by default and does
-NOT accept a custom target directory. Use one of the two
-workarounds below.
+`npx skills add` does not support custom target directories, so
+install globally and then move into the role.
 
-**Option A — install globally, then move:**
+Execute:
 
 ```bash
 npx skills add larksuite/cli -g -y
 mkdir -p roles/lark-subscribe-router/skills
-mv ~/.agents/skills/lark-* roles/lark-subscribe-router/skills/
-
-# commit the skills into the role's git tree so the agent picks
-# them up regardless of the deployment's global state
-cd roles/lark-subscribe-router/skills
-for d in lark-*/; do
-  if [ -d "$d/references" ]; then
-    git add "$d/SKILL.md" "$d/references/" 2>/dev/null || git add "$d"
-  else
-    git add "$d/SKILL.md" 2>/dev/null || git add "$d"
-  fi
+shopt -s nullglob
+for d in ~/.agents/skills/lark-*; do
+  mv "$d" "roles/lark-subscribe-router/skills/"
 done
-git commit -m "chore(roles/lark-subscribe-router): install lark-cli skills"
-cd -
 ```
 
-**Option B — clone the source repo and copy the skills directly
-(no global install):**
-
-```bash
-git clone https://github.com/larksuite/cli /tmp/lark-cli
-mkdir -p roles/lark-subscribe-router/skills
-cp -r /tmp/lark-cli/skills/lark-* roles/lark-subscribe-router/skills/
-
-# commit as above
-```
-
-**Verify:**
+Verify:
 
 ```bash
 ls roles/lark-subscribe-router/skills/
-# expect: ~21 directories named lark-*/ (lark-event, lark-im, lark-contact,
-# lark-shared, lark-doc, lark-drive, lark-calendar, lark-task, etc.)
-#
-# Each lark-*/SKILL.md must exist with non-empty frontmatter
-# (name + description fields).
+# expect ~21 directories named lark-*/ (lark-event, lark-im,
+# lark-contact, lark-shared, lark-doc, lark-drive, lark-calendar,
+# lark-task, etc.)
+
+# Spot-check a skill loads (each has SKILL.md with frontmatter)
+head -5 roles/lark-subscribe-router/skills/lark-event/SKILL.md
 ```
 
-Note: option A leaves `npx skills add` as the install source, which
-makes future upgrades easier (`npx skills update`). Option B is
-fully self-contained but requires manual upgrades.
+Note: this makes a one-time copy. If the user later updates lark-cli
+skills (`npx skills update`), re-run this step to refresh the
+role's `skills/` directory.
 
-### 1.2 Install lark-cli binary
+---
+
+## Step 2 — Install lark-cli binary
+
+The official npm package is `@larksuite/cli` (NOT the unrelated
+`npm.im/lark-cli`, which is a different project).
+
+Execute:
 
 ```bash
 npm install -g @larksuite/cli
 ```
 
-This is the official npm package (NOT the unrelated `lark-cli` from
-`npm.im/lark-cli` which is a different project).
-
-**Verify:**
+Verify:
 
 ```bash
 lark-cli --version
 # expect: lark-cli version 1.x
+hash -r   # in case the binary path changed
 ```
 
-### 1.3 Configure bot identity
+---
 
-Bot-side calls (when the bridge runs as `--as bot`) use
-`tenant_access_token`. Configure the app credentials from the Lark
-developer console:
+## Step 3 — Configure bot identity
+
+Bot-side calls (when `scripts/lark-source.js` runs as `--as bot`)
+use `tenant_access_token`. Requires app credentials from the Lark
+developer console.
+
+**Collect from user:** ask the user for:
+- `app_id` (from the developer console app page)
+- `app_secret` (from the same page; treat as sensitive)
+- `brand`: `feishu` or `lark` (default `lark` if the user isn't sure)
+
+**Initialize via lark-cli:**
+
+Execute:
 
 ```bash
-lark-cli config init
-# prompts for: app_id, app_secret (paste), brand (feishu vs lark)
+lark-cli config init <<EOF
+$app_id
+$app_secret
+$brand
+EOF
 ```
 
-**Verify:**
+(Or use the interactive form if the heredoc isn't supported.)
+
+Verify:
 
 ```bash
 lark-cli config list
 # expect: app-id present, brand present, default-as: auto
 ```
 
-If `lark-cli config init` is not available, fall back to setting
-env vars `LARK_APP_ID` / `LARK_APP_SECRET` directly.
+If `lark-cli config init` is not available in this version, fall
+back to env vars:
 
-### 1.4 Authenticate the current user
+```bash
+export LARK_APP_ID=$app_id
+export LARK_APP_SECRET=$app_secret
+export LARK_BRAND=$brand
+```
 
-User-side calls (when the agent invokes `lark-cli im ... --as user`)
-use `user_access_token`. Authenticate via OAuth device flow:
+Persist these env vars (e.g. via `~/.bashrc` or the workspace's
+own config) so they survive agent restarts.
+
+---
+
+## Step 4 — Authenticate current user
+
+User-side calls (`lark-cli im ... --as user`, `lark-cli contact ...`)
+use `user_access_token`. Device-flow login is interactive (browser),
+but you (the agent) can drive it.
+
+Execute:
 
 ```bash
 lark-cli auth login --no-wait
-# prints a device authorization URL; visit it in a browser
-# after approving, copy the device_code printed by the next step
-lark-cli auth login --device-code <device_code>
 ```
 
-This step is interactive (browser-side). The `--no-wait` flag lets a
-script print the URL without blocking; the second invocation completes
-the flow after the human approves in the browser.
+This prints a JSON blob including a verification URL. Show the URL
+to the user and ask them to visit it in a browser, approve, and
+copy the device_code back.
 
-**Verify:**
+After the user replies with the code:
+
+```bash
+lark-cli auth login --device-code "$device_code"
+```
+
+Verify:
 
 ```bash
 lark-cli auth status
-# expect: "identity": "user", grantedAt present,
-# scope contains required perms (e.g. im:message:readonly for receive,
-# contact:user.base:readonly for sender lookup)
+# expect: "identity": "user", grantedAt present, scope non-empty.
+# Critical scopes for the router:
+#   - im:message.p2p_msg:readonly (im.message.receive_v1 events)
+#   - im:message.group_msg:get_as_user
+#   - contact:user.base:readonly (sender lookup)
+#   - contact:user:search
+# If scope list is missing critical perms, re-run:
+#   lark-cli auth login --scope "<needed scopes>"
 ```
 
-If the scope list is missing critical permissions, re-run
-`lark-cli auth login --scope "<needed scopes>"`.
+Persist the user identity (open_id from step 5) and the fact that
+auth is done in `roles/lark-subscribe-router/bindings.yaml`.
 
 ---
 
-## §2 — Admin binding (agent executes via d-pi + lark-cli tools)
+## Step 5 — Bind current user as agent group admin
 
-After §1 is complete, the agent should execute this section. It uses
-the lark-cli skills (now in role) plus the d-pi CLI to identify the
-current user and bind them as this agent group's admin.
+After step 3 (bot) and step 4 (user) succeed, bind the user as
+admin of this agent group. This makes them authorized to use the
+router and to be reached for user-bound messages.
 
-### 2.1 Discover the current user's Lark identity
-
-Use the `lark-contact` skill (via lark-cli as the user identity
-configured in 1.4) to look up who the authenticated user is:
+Execute:
 
 ```bash
-lark-cli contact +me --as user
-# Returns: { "open_id": "ou_xxx", "name": "...", "email": "..." }
-```
+# 1. Discover the current user's Lark identity
+USER_INFO=$(lark-cli contact +me --as user)
+# Extract: open_id, name, email (parse with jq or string match)
+OPEN_ID=$(echo "$USER_INFO" | jq -r '.data.user.open_id // .open_id // .data.open_id')
+NAME=$(echo "$USER_INFO" | jq -r '.data.user.name // .name // .data.name')
+EMAIL=$(echo "$USER_INFO" | jq -r '.data.user.email // .email // .data.email // ""')
+echo "User: $NAME <$EMAIL> open_id=$OPEN_ID"
 
-Record `open_id`, `name`, `email`. These identify the user to d-pi.
+# 2. Create a d-pi local user for them
+CREATE_OUT=$(d-pi users create "$NAME" --description "Lark user $OPEN_ID")
+PUBLIC_KEY=$(echo "$CREATE_OUT" | grep -oE 'MC[A-Za-z0-9+/=_-]+' | head -1)
+# Fallback: read from ~/.d-pi/users/<name>.json
+if [ -z "$PUBLIC_KEY" ]; then
+  PUBLIC_KEY=$(jq -r '.publicKey' "$HOME/.d-pi/users/$NAME.json")
+fi
+echo "d-pi user '$NAME' created with publicKey=$PUBLIC_KEY"
 
-### 2.2 Create a d-pi local user for them
+# 3. Add the user to this workspace's allow-user list as admin
+# (must run from inside the d-pi workspace)
+d-pi allow-user add "$NAME" --key "$PUBLIC_KEY" \
+                       --description "Lark user $OPEN_ID <$EMAIL> — admin"
 
-```bash
-d-pi users create <display-name>
-# e.g. d-pi users create "Alice LarkUser"
-# Creates ~/.d-pi/users/<name>.json with keypair.
-# Output prints the publicKey.
-```
-
-Pick a name that's recognisable but stable (e.g. the user's display
-name or a slug of their open_id). Store the publicKey for step 2.3.
-
-### 2.3 Add the user to this workspace's allow list as admin
-
-```bash
-d-pi allow-user add <name> --key <publicKey-from-2.2> \
-                     --description "<Lark user> (<open_id>) — admin"
-```
-
-This must be run from inside a d-pi workspace (i.e. after
-`d-pi init`). If no workspace exists, run `d-pi init` first.
-
-### 2.4 Persist the Lark ↔ d-pi binding
-
-Write a binding file so future reloads and the router agent can
-re-derive the link without re-querying Lark:
-
-```yaml
-# roles/lark-subscribe-router/bindings.yaml
+# 4. Persist the Lark ↔ d-pi binding for future reloads
+cat > roles/lark-subscribe-router/bindings.yaml <<YAML
 admins:
-  - d_pi_user: <name-from-2.2>
+  - d_pi_user: $NAME
     lark:
-      open_id: <open_id-from-2.1>
-      name: <name-from-2.1>
-      email: <email-from-2.1>
-    permissions: [route, synthesize, send-user-message]
-    bound_at: <iso8601>
+      open_id: $OPEN_ID
+      name: $NAME
+      email: $EMAIL
+    permissions:
+      - route
+      - synthesize
+      - send-user-message
+    bound_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+YAML
 ```
 
-(Schema TBD — for now, free-form YAML/JSON is fine. The router agent
-reads this on startup to know who to trust.)
-
-### 2.5 Verify the bind
+Verify:
 
 ```bash
 d-pi allow-user list
-# expect: the new user listed with description matching step 2.3
+# expect: $NAME listed with description matching step 3
+
+# The workspace's agents/root/agent.json should now reference this
+# user, or at minimum the role-loader should accept routing to them
+ls agents/*/agent.json
 ```
 
-Then send a test message in Lark to the bot and confirm the d-pi
-source emits a notification (check the bridge's stdout via
-`journalctl` / `tail -f` of the source log, or just wait for an
-inbound event to appear in the agent's session).
+Note: `d-pi users create` writes to `~/.d-pi/users/<name>.json` (global).
+`d-pi allow-user add` writes to `<workspace>/auths/secrets/<name>.json`
+(workspace-local). Both are required.
 
 ---
 
-## §3 — Failure modes
+## Step 6 — Verify end-to-end
 
-| Failure | Detection | Resolution |
-|---|---|---|
-| Skills not in role `skills/` | `ls roles/lark-subscribe-router/skills/lark-event` fails | Re-run §1.1 |
-| `lark-cli: command not found` | shell error | Re-run §1.2 |
-| Bot calls return `tenant_access_token invalid` | lark-cli error message mentions token | Re-run §1.3, verify app_id / app_secret |
-| User calls return `user_access_token expired` | lark-cli auth status | Re-run §1.4 |
-| `d-pi: Not a d-pi workspace` | CLI error | Run `d-pi init` first, then §2 |
-| Allow-user add fails with "no workspace" | CLI error | Same as above |
-| Bridge emits nothing when Lark messages arrive | source supervisor logs | Check `lark-cli event status` to see if bus daemon is running; restart source |
+Send a real Lark message to the bot (the user does this):
+
+1. User sends "ping" in a Lark chat with the bot.
+2. The Lark event reaches `scripts/lark-source.js` over the bridge.
+3. d-pi wraps it with the meta header and delivers to you.
+4. You see `[meta({...sourceType: "source", sourceName: "lark-bot"...})]`
+   in your user-side message context.
+5. You route it to a child agent (or to root if no specific role
+   matches).
+6. The child agent's `[report-to-user handle=...]` response comes
+   back. You synthesize and send via `lark-im`.
+
+If any link in this chain breaks, see Failure modes below.
+
+Mark bootstrap done: create or update a workspace-state marker
+(e.g. `.dpi/bootstrap/done.json`) so future agent starts don't
+re-run this file unnecessarily.
 
 ---
 
-## §4 — Re-bootstrap / upgrade
+## Failure modes
 
-Re-running this file is safe and idempotent:
+| Step | Failure | Detection | Resolution |
+|---|---|---|---|
+| 1 | Skills not visible to agent | `ls roles/lark-subscribe-router/skills/lark-event/SKILL.md` fails | Re-run step 1; check d-pi's role loader picks up the path |
+| 2 | `lark-cli: command not found` | shell error | Re-run `npm install -g @larksuite/cli`; check `$PATH` |
+| 3 | Bot token errors (401 from Lark) | lark-cli error mentions token | Verify app_id / app_secret in lark-cli config list; re-init if rotated |
+| 4 | Device code rejected or expired | lark-cli auth status shows no user identity | Re-run `lark-cli auth login --no-wait`, ask user to re-authorize |
+| 4 | Scope missing critical perms | lark-cli auth status scope list | Re-run `lark-cli auth login --scope "<scopes>"` |
+| 5 | `d-pi: Not a d-pi workspace` | CLI error | Run `d-pi init` first, then re-run step 5 |
+| 5 | Allow-user add fails with "publicKey invalid" | CLI error | PublicKey extraction failed; read from `~/.d-pi/users/$NAME.json` directly |
+| 6 | No event reaches d-pi after Lark send | d-pi source log | Check `lark-cli event status --fail-on-orphan`; verify the bridge is registered as a d-pi source |
+| 6 | Event reaches d-pi but no `[report-to-user]` reply | router AGENTS.md logs | Verify bindings.yaml; ensure router has the user as admin |
 
-- §1.1 (skills): if skills exist in target dir, `npx skills add` will
-  skip / update. Re-run after upgrading `@larksuite/cli` to pick up
-  new skills.
-- §1.2 (binary): `npm install -g` upgrades in place.
-- §1.3 (bot identity): re-run `lark-cli config init` only if app
-  credentials rotate.
-- §1.4 (user auth): `lark-cli auth login` refreshes tokens.
-- §2 (admin binding): re-running creates an extra local user;
-  clean up with `d-pi users delete <old-name>` first if rotating
-  the binding.
+---
 
-To rotate the bot credentials or rebind to a different user,
-re-run the corresponding step only.
+## Re-bootstrap / upgrade
+
+Re-running this file is safe and idempotent. To upgrade or rotate:
+
+- **Step 1**: re-run after `npx skills update` to pick up new lark skills.
+- **Step 2**: re-run `npm install -g @larksuite/cli@latest`.
+- **Step 3**: re-run only if app credentials rotate (rare).
+- **Step 4**: `lark-cli auth login` refreshes the token; expires in ~2h
+  by default, auto-refreshed by lark-cli.
+- **Step 5**: to rebind to a different user, run `d-pi users delete
+  <old-name>` first, then re-run step 5.
+
+After any re-bootstrap, delete the workspace-state marker
+(`.dpi/bootstrap/done.json`) so the next agent start knows to
+verify, not assume.
 
 ---
 
 ## See also
 
-- `AGENTS.md` — runtime context the router agent sees
-- `scripts/README.md` — operational bridge (lark-source.js)
+- `AGENTS.md` — runtime context the router agent sees during normal
+  operation (after bootstrap)
+- `scripts/README.md` — operational bridge between lark-cli and d-pi
 - d-pi source validator: `packages/d-pi/src/hub/source-validator.ts`
 - d-pi role loader: `packages/d-pi/src/workspace/workspace.ts`
   (`collectGroupArchitectureContext`)
