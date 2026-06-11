@@ -27,9 +27,14 @@ d-pi source JSON-RPC 2.0 notifications.
             "mode":"steer"}}
 ```
 
-Stderr is prefixed with the EventKey and passed through (lark-cli's
-`ready` markers, d-pi supervisor logs, validation warnings) — never
-mixes with stdout.
+Stderr is reserved for fatal errors only. lark-cli's chatty stderr
+(ready markers, heartbeats, "[event] bus daemon started", etc.) is
+**dropped** (`stdio: "ignore"` for the consume subprocesses) because
+d-pi's source-manager otherwise forwards every stderr line as a
+source message to the subscribed agent, flooding the router's
+context. The d-pi supervisor's own stderr still captures the bridge's
+own fatal-error writes (a handful of lines on startup, one per child
+on shutdown).
 
 ### Usage
 
@@ -155,9 +160,14 @@ response, so we mirror TUI Ctrl+Enter (interrupt) rather than Enter
 
 - Stdout is one merged NDJSON-of-JSON-RPC stream — consumers see
   events from all EventKeys interleaved.
-- Stderr is prefixed with `[lark-source/<EventKey>]` so per-key logs
-  are distinguishable.
-- Subprocess exit codes are logged per-key.
+- Stderr is reserved for the bridge's own fatal-error writes
+  (e.g. "Failed to discover EventKeys: ...", "fatal: ...") — visible
+  in the d-pi supervisor's log, NOT to subscribed agents.
+- lark-cli's per-key stderr (heartbeats, "[event] bus daemon pid=…",
+  "ready event_key=…", "exited — received 0 event(s)") is dropped at
+  the source to keep the agent context clean.
+- Subprocess exit codes are logged per-key on the bridge's own
+  stderr.
 
 ### Why this script exists
 

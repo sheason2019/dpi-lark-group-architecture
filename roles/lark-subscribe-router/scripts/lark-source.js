@@ -158,8 +158,15 @@ function spawnLarkCli(eventKey, opts) {
 	// "pipe" and NEVER calling .end() / .destroy() on the write end.
 	// The handle is unref'd so it doesn't keep the event loop alive,
 	// but it stays open as long as the bridge process exists.
+	//
+	// lark-cli's stderr is dropped (stdio: "ignore") because d-pi's
+	// source-manager forwards every stderr line as a "source message"
+	// to subscribed agents — lark-cli's chatty startup / heartbeat
+	// stderr would flood the router's context. The bridge's OWN
+	// stderr is used for fatal errors only (and d-pi supervisor sees
+	// those).
 	const child = spawn("lark-cli", args, {
-		stdio: ["pipe", "pipe", "pipe"],
+		stdio: ["pipe", "pipe", "ignore"],
 	});
 	if (child.stdin) child.stdin.unref();
 
@@ -202,9 +209,10 @@ function listAvailableEventKeys() {
 			stdout += chunk.toString("utf8");
 		});
 		child.stderr.on("data", (chunk) => {
+			// Capture internally for error reporting; do NOT forward
+			// to our own stderr — d-pi would treat every line as a
+			// source message and flood the subscribed agent.
 			stderr += chunk.toString("utf8");
-			// pass list stderr through too (ready markers etc.)
-			process.stderr.write(`[lark-source/list] ${chunk}`);
 		});
 		child.on("error", (err) => {
 			reject(new Error(`failed to spawn lark-cli event list: ${err.message}`));
@@ -400,25 +408,13 @@ async function main() {
 		});
 	}
 
-	// Tag each child's stderr with its EventKey and forward to our
-	// stderr. Stderr MUST NOT mix with stdout (preserves JSON purity).
-	for (const { key, child } of children) {
-		const tag = `[lark-source/${key}] `;
-		let carryover = "";
-		child.stderr.on("data", (chunk) => {
-			const text = carryover + chunk.toString("utf8");
-			const lines = text.split("\n");
-			carryover = lines.pop(); // last fragment may be incomplete
-			for (const line of lines) {
-				process.stderr.write(tag + line + "\n");
-			}
-		});
-		child.stderr.on("end", () => {
-			if (carryover.length > 0) {
-				process.stderr.write(tag + carryover + "\n");
-			}
-		});
-	}
+	// (lark-cli stderr is set to stdio: "ignore" in spawnLarkCli because
+	// d-pi's source-manager forwards every stderr line as a source
+	// message — lark-cli's chatty heartbeat / ready markers would
+	// flood the subscribed agent's context. The bridge's OWN stderr
+	// is reserved for fatal errors only, visible to the d-pi
+	// supervisor's log.)
+
 
 	// Merge all children's stdout into one readline interface. Events
 	// from different EventKeys interleave on this single line stream;
