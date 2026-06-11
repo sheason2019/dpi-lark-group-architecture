@@ -151,9 +151,17 @@ function spawnLarkCli(eventKey, opts) {
 	if (opts.quiet) args.push("--quiet");
 	for (const p of opts.extraParams) args.push("--param", p);
 
+	// lark-cli `event consume` treats stdin EOF as a shutdown signal
+	// (designed for AI subprocess callers that close stdin to signal
+	// "I'm done"). d-pi spawns the bridge with a stdin pipe it never
+	// writes to or closes; we mirror that for lark-cli by using
+	// "pipe" and NEVER calling .end() / .destroy() on the write end.
+	// The handle is unref'd so it doesn't keep the event loop alive,
+	// but it stays open as long as the bridge process exists.
 	const child = spawn("lark-cli", args, {
-		stdio: ["ignore", "pipe", "pipe"],
+		stdio: ["pipe", "pipe", "pipe"],
 	});
+	if (child.stdin) child.stdin.unref();
 
 	child.on("error", (err) => {
 		console.error(`[lark-source/${eventKey}] failed to spawn lark-cli: ${err.message}`);
@@ -172,6 +180,10 @@ function spawnLarkCli(eventKey, opts) {
  *
  * Returns: array of EventKey strings, or rejects with an Error.
  *
+ * Note: `lark-cli event list` is a static query of what the app has
+ * registered in the developer console — it is NOT identity-aware, so
+ * we do NOT pass `--as` here. `--as` is only for `event consume`.
+ *
  * Tolerated output shapes:
  *   - top-level array:               ["im.message.receive_v1", ...]
  *   - {events: [...]}                (lark-cli --json wraps in `events`)
@@ -179,13 +191,11 @@ function spawnLarkCli(eventKey, opts) {
  *   - {EventKeys: [...]}             (alternative capitalisation)
  *   - array of objects with `key` or `eventKey` field
  */
-function listAvailableEventKeys(opts) {
+function listAvailableEventKeys() {
 	return new Promise((resolve, reject) => {
-		const child = spawn(
-			"lark-cli",
-			["event", "list", "--json", "--as", opts.as],
-			{ stdio: ["ignore", "pipe", "pipe"] },
-		);
+		const child = spawn("lark-cli", ["event", "list", "--json"], {
+			stdio: ["ignore", "pipe", "pipe"],
+		});
 		let stdout = "";
 		let stderr = "";
 		child.stdout.on("data", (chunk) => {
@@ -328,7 +338,7 @@ async function main() {
 			"[lark-source] No --event-key specified; querying `lark-cli event list --json` to discover all registered events...\n",
 		);
 		try {
-			eventKeys = await listAvailableEventKeys(opts);
+			eventKeys = await listAvailableEventKeys();
 		} catch (err) {
 			process.stderr.write(
 				`[lark-source] Failed to discover EventKeys: ${err.message}\n` +
@@ -415,6 +425,10 @@ async function main() {
 	// the JSON-RPC envelope includes params.type so consumers can
 	// distinguish them.
 	const mergedStdout = new PassThrough();
+	// With many concurrent EventKeys (dynamic discovery may spawn 10+),
+	// each child adds unpipe/error/close/finish listeners to the
+	// PassThrough; raise the cap to silence the leak warning.
+	mergedStdout.setMaxListeners(0);
 	for (const { child } of children) {
 		child.stdout.pipe(mergedStdout);
 	}
