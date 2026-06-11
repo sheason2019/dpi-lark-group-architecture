@@ -34,6 +34,11 @@ unless re-bootstrap is requested.
 | 4 | Current user authenticated via device flow | **yes** — ask user to visit URL |
 | 5 | Current user bound as agent group admin | no (uses step 3+4 output) |
 | 6 | Bridge registered as a d-pi source | no (uses step 1+3 output) |
+| 6.0 | `npm install` in `scripts/` (SDK bridge only) | no |
+| 6.1 | User re-pastes `app_secret` for SDK bridge | **yes** — ask user |
+| 6.2 | `create_source` called with `env` for SDK bridge | no |
+| 6.3 | `create_source` called without `env` for subprocess bridge | no |
+| 6.4 | `list_sources` shows source running | no |
 | 7 | End-to-end Lark → d-pi → Lark verified | yes (user sends a real Lark msg) |
 
 When all seven are checked, mark bootstrap done and proceed to
@@ -263,56 +268,110 @@ Note: `d-pi users create` writes to `~/.d-pi/users/<name>.json` (global).
 
 ## Step 6 — Register the bridge as a d-pi source
 
-After step 4 (user auth) succeeds, register
-`scripts/lark-source.js` as a d-pi source so Lark events actually
-flow into the workspace. The bridge spawns `lark-cli event consume`
-subprocesses (one per EventKey) and converts their NDJSON output to
-JSON-RPC 2.0 notifications on its own stdout.
+After step 4 (user auth) succeeds, register the Lark bridge as a
+d-pi source so Lark events actually flow into the workspace.
 
-Use the `create_source` tool (you have it as part of the d-pi
-built-in extension). No `--event-key` is specified — the bridge
-dynamically queries `lark-cli event list --json` at startup to
-discover every EventKey the app has registered, and subscribes to
-all of them.
+There are two bridge implementations in `scripts/`. Use the
+SDK-based one (`lark-source-sdk.js`) unless you have a specific
+reason to prefer the lark-cli subprocess bridge
+(`lark-source.js`).
 
-**Tool call:**
+| Bridge | Mechanism | When to use |
+|---|---|---|
+| `lark-source-sdk.js` | Uses `@larksuiteoapi/node-sdk`'s `WSClient` to connect directly to Lark's WebSocket gateway. The SDK reads the app's brand metadata and picks `lark-websocket` vs `feishu-websocket` correctly. | **Default.** Bypasses the lark-cli 1.0.51 `feishu-websocket` hardcode bug. Requires `npm install` in `scripts/`. |
+| `lark-source.js` | Spawns one `lark-cli event consume <key>` subprocess per EventKey and pipes NDJSON into a JSON-RPC stream. | Use only if the SDK can't connect (e.g. very old Node, sandboxed env without `npm install`). |
+
+### 6.0 Install SDK dependencies (one-time)
+
+```bash
+cd /private/tmp/dpi-smoke/roles/lark-subscribe-router/scripts
+npm install --ignore-scripts
+```
+
+`--ignore-scripts` is for the workspace's security policy
+(AGENTS.md: never run lifecycle scripts unless asked). The SDK has
+no install-time hooks so this is fine.
+
+### 6.1 Ask the user for `app_secret`
+
+The SDK bridge needs `LARK_APP_ID` and `LARK_APP_SECRET` in its
+process env. Step 3 collected `app_id` from the user. Ask the
+user to re-confirm `app_secret` for injection into the source
+env (it was provided in step 3 originally; re-confirming keeps
+the secret out of agent memory and out of the workspace files).
+
+Plain-text prompt:
+
+> To register the Lark bridge as a d-pi source, I need the bot
+> app secret. You provided it during step 3. Paste it again now
+> and I'll inject it into the source env. It will live only in
+> d-pi's in-memory source record (never written to disk, never
+> committed to git).
+
+If the user prefers not to paste, they can decline and we fall
+back to the `lark-source.js` subprocess bridge (which uses
+lark-cli's own keychain-stored secret).
+
+### 6.2 Register the SDK bridge
+
+Use the `create_source` tool. Pass `app_id` and `app_secret` via
+`env` (d-pi source-manager merges these into the bridge's
+process env at spawn time; never written to disk).
 
 ```
 create_source(
-  name   = "lark-bot"
+  name = "lark-bot"
   command = "node"
   args = [
-    "/abs/path/to/roles/lark-subscribe-router/scripts/lark-source.js",
-    "--as", "bot"
+    "/abs/path/to/roles/lark-subscribe-router/scripts/lark-source-sdk.js"
+  ]
+  env = {
+    "LARK_APP_ID":     "<app_id from step 3>"
+    "LARK_APP_SECRET": "<app_secret the user just pasted>"
+    "LARK_BRAND":      "lark"     # or "feishu"
+    "LARK_LOG_LEVEL":  "warn"     # keep quiet; "info" for debugging
+  }
+)
+```
+
+On success: `Source "lark-bot" created and running. You have been
+automatically subscribed to this source.`
+
+The hub spawns the bridge subprocess. The bridge:
+
+1. Reads `LARK_APP_ID` / `LARK_APP_SECRET` from env
+2. Spawns `lark-cli event list --json` to discover EventKeys
+3. Constructs an `Lark.WSClient` (picks the right WebSocket
+   domain from the app metadata — fixes the lark-cli 1.0.51
+   `feishu-websocket` hardcode)
+4. Registers one handler per EventKey
+5. Emits JSON-RPC 2.0 notifications on stdout as events arrive
+
+### 6.3 Register the subprocess bridge (fallback)
+
+If the user can't provide `app_secret` for the SDK bridge, or if
+`npm install` fails, use the subprocess bridge. It uses lark-cli's
+own keychain-stored secret (no app_secret in source env).
+
+```
+create_source(
+  name = "lark-bot"
+  command = "node"
+  args = [
+    "/abs/path/to/roles/lark-subscribe-router/scripts/lark-source.js"
   ]
 )
 ```
 
-(use the absolute path to the script in this workspace.)
+No `env` needed. No `npm install` needed. The bridge spawns
+`lark-cli event consume <key> --as bot` for each EventKey.
 
-On success you should see `Source "lark-bot" created and running.`
-and you're auto-subscribed to it (per the tool contract). The hub
-spawns the bridge subprocess, which in turn spawns one `lark-cli
-event consume` per EventKey. All stderr from the bridge and its
-lark-cli children is forwarded to your context.
+**Limitation**: as of lark-cli 1.0.51 the event bus daemon
+hardcodes `feishu-websocket` regardless of brand config, so
+Lark-international apps get "Incorrect domain name" and no
+events flow. Use the SDK bridge unless you can work around that.
 
-If you want to subscribe to only a subset of events (e.g. only
-message events, no reactions), pass them explicitly:
-
-```
-create_source(
-  name   = "lark-bot"
-  command = "node"
-  args = [
-    "/abs/path/to/roles/lark-subscribe-router/scripts/lark-source.js",
-    "--event-key", "im.message.receive_v1",
-    "--event-key", "im.chat.member.user.added_v1",
-    "--as", "bot"
-  ]
-)
-```
-
-Verify:
+### 6.4 Verify
 
 ```
 list_sources()
@@ -320,25 +379,27 @@ list_sources()
 #   args: [...], status: "running", subscriberCount: 1 }]
 ```
 
-Also check the bridge's stderr — you should see lines like:
+Bridge stderr (visible in d-pi supervisor log) should show:
 
 ```
-[lark-source] No --event-key specified; querying `lark-cli event list --json` to discover all registered events...
-[lark-source] Discovered 11 EventKey(s) to subscribe:
-[lark-source]   - im.message.receive_v1
-[lark-source]   - im.message.reaction.created_v1
-[lark-source]   - ... (etc.)
-[lark-source/im.message.receive_v1] [ready] im.message.receive_v1
-[lark-source/im.message.reaction.created_v1] [ready] im.message.reaction.created_v1
-[lark-source/...] [ready] ...
+[lark-source-sdk] starting (appId=..., brand=lark, logLevel=WARN)
+[lark-source-sdk] discovered N EventKey(s) to subscribe:
+[lark-source-sdk]   - im.message.receive_v1
+[lark-source-sdk]   - ... (etc.)
+[lark-source-sdk] ready: subscribed to N EventKey(s), waiting for events.
 ```
 
-The `[ready]` lines come from `lark-cli event consume` (see the
-lark-event skill's subprocess contract). One per EventKey.
+The `ready` line means the WSClient connected and the EventKey
+handshake succeeded. After this, real Lark events will appear in
+the agent's context as `[meta({sourceName: "lark-bot"...})]`
+JSON-RPC notifications.
 
 ---
 
 ## Step 7 — Verify end-to-end
+
+
+
 
 Send a real Lark message to the bot (the user does this):
 

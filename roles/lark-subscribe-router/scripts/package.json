@@ -1,0 +1,15 @@
+{
+	"name": "lark-subscribe-router-bridge",
+	"version": "0.1.0",
+	"private": true,
+	"description": "Bridges Lark/Feishu WebSocket events to d-pi source JSON-RPC 2.0 notifications. Uses the official @larksuiteoapi/node-sdk which selects the right WebSocket domain (lark-websocket vs feishu-websocket) based on the app's brand registration — sidestepping the lark-cli bus daemon's hardcoded-feishu-websocket bug.",
+	"scripts": {
+		"start": "node lark-source-sdk.js"
+	},
+	"dependencies": {
+		"@larksuiteoapi/node-sdk": "^1.66.1"
+	},
+	"engines": {
+		"node": ">=18"
+	}
+}

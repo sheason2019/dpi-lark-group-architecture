@@ -1,0 +1,8 @@
+node_modules/
+package-lock.json
+
+# Secret material is injected via create_source.env at runtime — never
+# commit a real .env. The d-pi source records live in-memory only; the
+# workspace itself never persists them to disk.
+.env
+.env.local

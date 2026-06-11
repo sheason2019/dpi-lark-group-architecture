@@ -5,6 +5,83 @@ Auxiliary scripts that bridge external systems into d-pi sources.
 This directory is part of the `lark-subscribe-router` role. Files
 here are operational helpers, not LLM-callable skills.
 
+The `package.json` here is a local Node project (private, scoped
+to this directory). `npm install --ignore-scripts` brings in
+`@larksuiteoapi/node-sdk` for the SDK-based bridge. `node_modules/`
+is gitignored.
+
+## Two bridge implementations
+
+| File | Mechanism | When to use |
+|---|---|---|
+| `lark-source-sdk.js` | Uses `@larksuiteoapi/node-sdk`'s `WSClient` to connect directly to Lark's WebSocket gateway. The SDK reads the app's brand metadata and picks `lark-websocket` vs `feishu-websocket` correctly. | **Default.** Bypasses the lark-cli 1.0.51 `feishu-websocket` hardcode bug. Requires `npm install`. |
+| `lark-source.js` | Spawns one `lark-cli event consume <key>` subprocess per EventKey and pipes NDJSON into a JSON-RPC stream. | Fallback. No `npm install` needed; uses lark-cli's own keychain-stored secret. **Broken for Lark-international apps on lark-cli 1.0.51**. |
+
+## `lark-source-sdk.js`
+
+The recommended bridge. Reads `LARK_APP_ID` and `LARK_APP_SECRET`
+from the process env (injected by d-pi `create_source.env` at
+spawn time — never hardcoded, never persisted to disk), discovers
+EventKeys via `lark-cli event list --json`, then opens a single
+WebSocket connection via the official Node SDK and emits one
+JSON-RPC 2.0 notification per incoming event.
+
+### Why this exists
+
+lark-cli 1.0.51's event bus daemon hardcodes the
+`feishu-websocket` source name regardless of the app's brand
+config. Lark-international apps get "Incorrect domain name" and
+the bus immediately exits, so the subprocess bridge can't
+deliver events. The official Node SDK's `WSClient` reads the
+app's tenant metadata and picks the right WebSocket domain, so
+it works for both Lark and Feishu apps.
+
+### Configuration
+
+| Env var | Required | Description |
+|---|---|---|
+| `LARK_APP_ID` | yes | App id, e.g. `cli_a91bf7a326b85bc8` |
+| `LARK_APP_SECRET` | yes | App secret (tenant mode). Injected by `create_source.env`; never committed. |
+| `LARK_BRAND` | no | `lark` (default) or `feishu`. Diagnostic only — the SDK picks the WebSocket domain itself. |
+| `LARK_LOG_LEVEL` | no | `debug` / `info` / `warn` / `error` (default `warn`). |
+
+### Install (one-time)
+
+```bash
+cd roles/lark-subscribe-router/scripts
+npm install --ignore-scripts
+```
+
+`--ignore-scripts` per the workspace's security policy (AGENTS.md:
+never run lifecycle scripts unless asked). The SDK has no
+install-time hooks.
+
+### Register as a d-pi source
+
+```ts
+create_source({
+  name: "lark-bot",
+  command: "node",
+  args: ["/abs/path/to/roles/lark-subscribe-router/scripts/lark-source-sdk.js"],
+  env: {
+    LARK_APP_ID: "<app_id>",
+    LARK_APP_SECRET: "<app_secret>",
+    LARK_BRAND: "lark",
+    LARK_LOG_LEVEL: "warn",
+  },
+});
+```
+
+Then subscribe the router agent:
+
+```ts
+subscribe_source({ source_name: "lark-bot" })
+```
+
+### Contract
+
+Identical to the subprocess bridge — see below.
+
 ## `lark-source.js`
 
 Bridges one or more `lark-cli event consume <EventKey>` streams to
