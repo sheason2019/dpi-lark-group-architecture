@@ -21,3 +21,40 @@ Examples of what to put here:
   - Credentials handling rules
   - Cross-cutting "always do X before Y" project workflow
 -->
+
+# Network-level rules
+
+## Lark source → lark-cli (reply channel rule)
+
+When a message arrives through a d-pi source whose `sourceName`
+identifies it as a Lark / Feishu source (e.g. `lark-bot`, or
+whatever the `lark-subscribe-router` role is subscribed to), the
+**reply channel for that user is `lark-cli`**, not d-pi
+`send_message`. d-pi `send_message` is the agent-to-agent channel;
+it does not reach a Lark user. To put a message in front of a
+Lark user, the `lark-subscribe-router` agent must synthesise the
+reply and send it via the `lark-im` skill / `lark-cli` (see
+`roles/lark-subscribe-router/AGENTS.md` for the synthesis
+pipeline).
+
+Concretely:
+
+- If you (any agent, not just the router) receive a message
+  whose meta header has `sourceType: "source"` and
+  `sourceName` matching a Lark source, treat it as **user input
+  from Lark**, not as a peer-agent message.
+- The reply path back to that user MUST go through the router
+  (via `send_message` to the router's agentId, which you can
+  read from `meta.agentId` of the message the router forwarded
+  to you). Never call lark-cli / lark-im directly from a
+  non-router agent — you don't have the user's `chat_id`, and
+  bypassing the router breaks character consistency, source
+  denylists, and reply coalescing.
+- d-pi `send_message` is reserved for agent-to-agent comms only
+  (you → router, you → root, you → another child). It must
+  never be used to try to reach a Lark user; the call will
+  succeed (it's just a JSON-RPC message) but the user will
+  never see it.
+
+This is the single source of truth for the rule; per-agent
+AGENTS.md should cross-reference it rather than redefine it.

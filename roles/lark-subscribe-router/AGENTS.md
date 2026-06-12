@@ -290,6 +290,14 @@ workspace exposes role-level config.)
 
 ## See also
 
+- **Network-level rule** (inherited by every agent in this
+  architecture): see `AGENTS.md` at the repo root for the
+  "Lark source → lark-cli" reply-channel rule. In short: only
+  this router agent uses `lark-cli` / `lark-im` to put messages
+  in front of Lark users; all other agents must relay through
+  the router via `send_message`. The rule is enforced by
+  convention, not by d-pi (d-pi itself doesn't know which
+  source maps to Lark), so don't bypass it from a child agent.
 - **d-pi tools**: `send_message`, `group_architecture`,
   `list_sources`, `subscribe_source`, `unsubscribe_source`
   (descriptions in the tools section of the system prompt).
