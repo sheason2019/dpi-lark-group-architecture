@@ -113,7 +113,7 @@ const DOMAIN =
 					);
 					process.exit(1);
 				})();
-const LOG_LEVEL = (process.env.LARK_LOG_LEVEL || "warn").toUpperCase();
+const LOG_LEVEL = (process.env.LARK_LOG_LEVEL || "warn").toLowerCase();
 
 if (!APP_ID || !APP_SECRET) {
 	process.stderr.write(
