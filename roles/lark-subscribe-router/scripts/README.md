@@ -39,6 +39,7 @@ registration (cross-registration requests 401).
 | `LARK_APP_SECRET` | yes | App secret (tenant mode). Injected by `create_source.env`; never committed. |
 | `LARK_BRAND` | no | `lark` (default) or `feishu`. Mapped to the SDK's `Lark.Domain` enum to pick the WebSocket endpoint. Must match the app's tenant registration. |
 | `LARK_LOG_LEVEL` | no | `debug` / `info` / `warn` / `error` (default `warn`). NOTE: the SDK enum is lowercase; `DEBUG` (uppercase) is silently ignored. |
+| `LARK_EVENT_DENYLIST` | no | Comma-separated EventKey blacklist. Denied EventKeys are NOT registered with the WSClient — they never reach d-pi. Use to mute auto-triggered events that aren't conversation signals (read receipts, reactions, ...). Literal `*` mutes everything (temporary mute). Unset = subscribe to all EventKeys the app has registered. Example: `im.message.message_read_v1,im.message.reaction.created_v1`. |
 
 ### Install (one-time)
 
@@ -63,6 +64,7 @@ create_source({
     LARK_APP_SECRET: "<app_secret>",
     LARK_BRAND: "feishu",            // or "lark" — match app's registration
     LARK_LOG_LEVEL: "warn",
+    LARK_EVENT_DENYLIST: "im.message.message_read_v1,im.message.reaction.created_v1,im.message.reaction.deleted_v1",
   },
 });
 ```

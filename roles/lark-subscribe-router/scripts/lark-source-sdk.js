@@ -52,6 +52,20 @@
  *   LARK_LOG_LEVEL    (optional) one of "debug"|"info"|"warn"|"error"
  *                      (default "warn"). The SDK's WSClient logger is
  *                      noisy at "debug" — keep at "warn" for production.
+ *   LARK_EVENT_DENYLIST (optional) comma-separated EventKey blacklist.
+ *                      Listed EventKeys are NOT registered with the
+ *                      WSClient — they are dropped at the bridge
+ *                      boundary, never reaching d-pi or the agent.
+ *                      Use this to mute auto-triggered events that
+ *                      aren't conversation signals (read receipts,
+ *                      reaction events, ...). Use the literal "*" to
+ *                      mute every EventKey (effectively disable the
+ *                      bridge — useful for temporary mute). When
+ *                      unset, all EventKeys the app has registered
+ *                      are subscribed. Examples:
+ *                        LARK_EVENT_DENYLIST=im.message.message_read_v1
+ *                        LARK_EVENT_DENYLIST=im.message.message_read_v1,im.message.reaction.created_v1
+ *                        LARK_EVENT_DENYLIST=*
  *
  * Lifecycle:
  *   - Connect to WebSocket gateway
@@ -97,6 +111,20 @@ console.trace = _consoleToStderr("trace");
 const APP_ID = process.env.LARK_APP_ID;
 const APP_SECRET = process.env.LARK_APP_SECRET;
 const BRAND = (process.env.LARK_BRAND || "lark").toLowerCase();
+// LARK_EVENT_DENYLIST: comma-separated EventKey blacklist. The
+// listed EventKeys are NOT registered with the SDK's WSClient —
+// they are dropped at the bridge, never entering d-pi. Unset
+// (or the literal "*" if you want a "mute everything" escape
+// hatch) means subscribe to everything the app has registered.
+const DENYLIST_RAW = (process.env.LARK_EVENT_DENYLIST || "").trim();
+const DENYLIST = DENYLIST_RAW === ""
+	? null // null = "no denylist" (subscribe-all)
+	: new Set(
+			DENYLIST_RAW
+				.split(",")
+				.map((s) => s.trim())
+				.filter((s) => s.length > 0),
+		);
 // Map BRAND to the SDK's Domain enum. The SDK uses domain to pick the
 // openapi / websocket endpoint (open.feishu.cn vs open.larksuite.com);
 // a feishu-registered app and a lark-registered one are not
@@ -221,7 +249,60 @@ async function main() {
 		process.exit(1);
 	}
 	process.stderr.write(
-		`[lark-source-sdk] discovered ${eventKeys.length} EventKey(s) to subscribe:\n`,
+		`[lark-source-sdk] discovered ${eventKeys.length} EventKey(s) from app registration:\n`,
+	);
+	for (const k of eventKeys) {
+		process.stderr.write(`[lark-source-sdk]   - ${k}\n`);
+	}
+
+	// 1b. Apply LARK_EVENT_DENYLIST blacklist. Denied EventKeys
+	//     never reach the WSClient handler registration, so they
+	//     never enter d-pi. Drops the noise at the bridge boundary,
+	//     not in the LLM context. The "mute everything" escape
+	//     hatch is LARK_EVENT_DENYLIST=* (useful for temporarily
+	//     silencing the bridge without unregistering the source).
+	if (DENYLIST !== null) {
+		const before = eventKeys.length;
+		eventKeys = eventKeys.filter((k) => !DENYLIST.has(k));
+		const muted = DENYLIST_RAW === "*";
+		process.stderr.write(
+			`[lark-source-sdk] denylist active${muted ? " (mute everything)" : `: ${DENYLIST_RAW}`}\n` +
+				`[lark-source-sdk] denylist result: ${eventKeys.length}/${before} EventKey(s) will be subscribed (${before - eventKeys.length} muted)\n`,
+		);
+		if (!muted) {
+			for (const k of DENYLIST) {
+				if (!eventKeys.includes(k) /* already-filtered, ie the denylisted key was registered */) {
+					// We've already passed the filter — anything left in
+					// eventKeys wasn't denylisted; anything in DENYLIST
+					// and registered in the original list has been dropped
+					// silently. Tell the operator if they listed a key the
+					// app never registered (typo guard).
+				}
+			}
+			const registered = new Set(listEventKeys());
+			for (const k of DENYLIST) {
+				if (k === "*") continue;
+				if (!registered.has(k)) {
+					process.stderr.write(
+						`[lark-source-sdk] warn: denylist lists EventKey "${k}" but it isn't registered in the app's developer console — double-check the spelling (or it may simply be the user side; that key is auto-registered too and will be muted on the user side, not ours)\n`,
+					);
+				}
+			}
+		}
+		if (eventKeys.length === 0 && DENYLIST_RAW !== "*") {
+			process.stderr.write(
+				`[lark-source-sdk] fatal: LARK_EVENT_DENYLIST mutes every registered EventKey. Use "*" explicitly if that's what you want; otherwise check the spelling.\n`,
+			);
+			process.exit(1);
+		}
+	} else {
+		process.stderr.write(
+			`[lark-source-sdk] denylist inactive (LARK_EVENT_DENYLIST unset) — subscribing to all discovered EventKeys.\n`,
+		);
+	}
+
+	process.stderr.write(
+		`[lark-source-sdk] will subscribe to ${eventKeys.length} EventKey(s):\n`,
 	);
 	for (const k of eventKeys) {
 		process.stderr.write(`[lark-source-sdk]   - ${k}\n`);
