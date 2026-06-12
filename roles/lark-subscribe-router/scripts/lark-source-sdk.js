@@ -66,11 +66,53 @@
 const { spawnSync } = require("node:child_process");
 const Lark = require("@larksuiteoapi/node-sdk");
 
+// Re-route console.log/info/warn/error/debug/trace to stderr so the
+// SDK's chatter (which goes through console.*) doesn't pollute the
+// JSON-RPC notification stream on stdout. The d-pi hub reads our
+// stdout verbatim and treats any non-JSON-RPC line as a parse error
+// (silently dropped) — useful chatty SDK logs would either get
+// dropped or, worse, leak into an agent's context as a malformed
+// source message.
+const _consoleToStderr = (level) => (...args) => {
+	process.stderr.write(`[console.${level}] `);
+	for (const a of args) {
+		if (typeof a === "string") process.stderr.write(a);
+		else {
+			try { process.stderr.write(JSON.stringify(a)); }
+			catch { process.stderr.write(String(a)); }
+		}
+		process.stderr.write(" ");
+	}
+	process.stderr.write("\n");
+};
+console.log = _consoleToStderr("log");
+console.info = _consoleToStderr("info");
+console.warn = _consoleToStderr("warn");
+console.error = _consoleToStderr("error");
+console.debug = _consoleToStderr("debug");
+console.trace = _consoleToStderr("trace");
+
 // --- Config ---------------------------------------------------------------
 
 const APP_ID = process.env.LARK_APP_ID;
 const APP_SECRET = process.env.LARK_APP_SECRET;
-const BRAND = process.env.LARK_BRAND || "lark"; // for diagnostic logging only
+const BRAND = (process.env.LARK_BRAND || "lark").toLowerCase();
+// Map BRAND to the SDK's Domain enum. The SDK uses domain to pick the
+// openapi / websocket endpoint (open.feishu.cn vs open.larksuite.com);
+// a feishu-registered app and a lark-registered one are not
+// interchangeable, so choose the wrong one and the WebSocket handshake
+// will 401/403.
+const DOMAIN =
+	BRAND === "feishu"
+		? Lark.Domain.Feishu
+		: BRAND === "lark"
+			? Lark.Domain.Lark
+			: (() => {
+					process.stderr.write(
+						`[lark-source-sdk] fatal: LARK_BRAND must be "lark" or "feishu", got "${BRAND}"\n`,
+					);
+					process.exit(1);
+				})();
 const LOG_LEVEL = (process.env.LARK_LOG_LEVEL || "warn").toUpperCase();
 
 if (!APP_ID || !APP_SECRET) {
@@ -199,12 +241,16 @@ async function main() {
 		};
 	}
 
-	// 3. Construct WSClient. The SDK chooses lark-websocket vs
-	//    feishu-websocket from the app's brand metadata, so we
-	//    don't have to hardcode an endpoint.
+	// 3. Construct WSClient. The domain (open.feishu.cn vs
+	//    open.larksuite.com) is driven by LARK_BRAND — the SDK's
+	//    WSClient reads it to pick the WebSocket endpoint. A
+	//    feishu-registered app and a lark-registered one are
+	//    not interchangeable, so BRAND must match the app's
+	//    registration.
 	const wsClient = new Lark.WSClient({
 		appId: APP_ID,
 		appSecret: APP_SECRET,
+		domain: DOMAIN,
 		loggerLevel: Lark.LoggerLevel[LOG_LEVEL] ?? Lark.LoggerLevel.warn,
 	});
 

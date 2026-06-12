@@ -1,0 +1,16 @@
+# Runtime / deployment assets — not part of the architecture source.
+# Install per deployment via the role-level BOOTSTRAP steps; never
+# commit.
+#
+#   roles/<role>/skills/            — installed by `npx skills add` (step 1)
+#   roles/<role>/scripts/node_modules/ — installed by `npm install --ignore-scripts` (step 6.0)
+#   roles/<role>/bindings.yaml      — written by the role bootstrap after user auth (step 5)
+#
+# Wildcard the role dir so future roles pick up the same conventions
+# without each having to add their own .gitignore.
+roles/*/skills/
+roles/*/scripts/node_modules/
+roles/*/bindings.yaml
+
+# Optional role bootstrap completion marker (created by role bootstrap).
+roles/*/.bootstrap-done
