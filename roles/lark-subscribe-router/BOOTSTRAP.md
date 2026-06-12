@@ -410,8 +410,10 @@ Send a real Lark message to the bot (the user does this):
    in your user-side message context.
 5. You route it to a child agent (or to root if no specific role
    matches).
-6. The child agent's `[report-to-user handle=...]` response comes
-   back. You synthesize and send via `lark-im`.
+6. The child agent's `send_message(agent_id=<your agentId>, ...)`
+   response comes back. You look up the routing map (by the
+   child's agentId in the inbound meta) and relay the synthesized
+   text to the user via `lark-im`.
 
 If any link in this chain breaks, see Failure modes below.
 
@@ -433,7 +435,7 @@ re-run this file unnecessarily.
 | 5 | `d-pi: Not a d-pi workspace` | CLI error | Run `d-pi init` first, then re-run step 5 |
 | 5 | Allow-user add fails with "publicKey invalid" | CLI error | PublicKey extraction failed; read from `~/.d-pi/users/$NAME.json` directly |
 | 6 | No event reaches d-pi after Lark send | d-pi source log | Check `lark-cli event status --fail-on-orphan`; verify the bridge is registered as a d-pi source |
-| 6 | Event reaches d-pi but no `[report-to-user]` reply | router AGENTS.md logs | Verify bindings.yaml; ensure router has the user as admin |
+| 6 | Event reaches d-pi but no reply comes back to the user | router AGENTS.md logs | Verify the child's `send_message` target is the router's agentId; verify the router's per-child routing map has a fresh entry for that child |
 
 ---
 

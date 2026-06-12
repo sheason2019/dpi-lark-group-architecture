@@ -6,6 +6,38 @@ version per release across all packages), but this architecture is
 content-only and ships via direct commits — there is no `version`
 field. Date-stamped entries below.
 
+## 2026-06-12 — Routing: drop `[routed via ...]` prefix and `[report-to-user handle=...]` marker
+
+The router/child message contract is simplified. Previously, the
+router added a `[routed via lark-subscribe-router, handle=X]` prefix
+when forwarding a user message to a child, and the child echoed
+back a `[report-to-user handle=X]` marker to identify the target
+chat. Both were redundant with the d-pi meta header (`sourceType:
+"agent"` + `agentId`) which already carries the same provenance
+information, and the handle token was internal router state that
+leaked into the LLM prompt as dead text.
+
+New contract:
+
+- **Forwarding (router → child)**: send the user's message body
+  verbatim, no prefix. The child reads `meta.agentId` to identify
+  the sender and to know where to reply (target = router's
+  agentId).
+- **Reporting (child → router)**: child just calls
+  `send_message(agent_id=<router's agentId>, message=...)` — no
+  marker. The router uses `meta.agentId === <child's id>` to
+  look up the per-child routing map (which it maintains as
+  `C → (sourceName, chat_id, thread)`) and relay to Lark.
+
+The router still maintains a routing map, but it's now strictly
+internal (the child never sees it). The `chat_id`, `sender_id`,
+Lark message types, and meta headers remain strictly server-side
+state and never leak to either the child's LLM context or the
+Lark user's message body.
+
+`lark-subscribe-router/AGENTS.md` and `BOOTSTRAP.md` updated to
+reflect the new contract.
+
 ## 2026-06-11 — Initial bootstrap + SDK bridge
 
 ### Added
