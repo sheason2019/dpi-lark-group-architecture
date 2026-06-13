@@ -56,5 +56,22 @@ Concretely:
   succeed (it's just a JSON-RPC message) but the user will
   never see it.
 
+### Inbound source routing — reply channel by origin
+
+When deciding where to send a reply, match the inbound
+`sourceType` to the right reply channel:
+
+| Inbound `sourceType` | Reply channel |
+|---|---|
+| `connect` (Connect TUI) | **This terminal.** Reply directly in the conversation. The user is sitting at the TUI; the message is visible to them as soon as you emit text. Do NOT call `lark-cli` / `lark-im` — that would send a duplicate to a Lark user who never asked for anything. |
+| `source` (Lark / Feishu / external) | `lark-cli` via the `lark-subscribe-router` agent (the routing chain documented above). |
+| `agent` (peer agent) | `send_message` to the originating `meta.agentId`. |
+
+The Connect TUI case is the easy one to get wrong: the user
+opens a Connect session, types a message, sees the agent
+replying — and then also gets a Lark message in the same chat
+because the agent reflexively called `lark-cli`. Always
+check the inbound meta before picking a reply channel.
+
 This is the single source of truth for the rule; per-agent
 AGENTS.md should cross-reference it rather than redefine it.
