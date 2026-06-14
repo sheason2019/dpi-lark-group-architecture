@@ -99,3 +99,36 @@ Default behaviour of `lark-cli` is `--as user` (no flag = user
 identity), so the explicit `--as bot` flag must be passed every
 single time. Treat it as part of the canonical reply command,
 not an optional override.
+
+## Do not double-channel: TUI inbound → TUI reply only
+
+When a user is communicating via the Connect TUI
+(`sourceType: "connect"`, `auth.name` set, meta `tips:
+"Message from Connect TUI, your output is visible to the
+user."`), the reply channel is **the TUI itself**. Do not
+call `lark-cli` to send a parallel message to the same user's
+Lark open_id.
+
+This is the corollary of the inbound source routing table
+above: if the inbound channel is TUI, the outbound channel is
+also TUI. Sending a duplicate via `lark-cli` is harmful
+because:
+
+- The user sees two streams of replies (one in the TUI, one
+  in Lark), forcing them to context-switch and read the same
+  thing twice.
+- If they are mid-typing in the TUI, your lark-cli reply
+  shows up as a Lark message that is irrelevant to their
+  current conversation context.
+- It can also confuse the source-deny-list logic in
+  `lark-source-sdk.js`, which may drop the lark-side reply
+  because it does not recognise a bot identity.
+
+The check is mechanical: read the inbound message's
+`sourceType`. If it is `connect`, never call `lark-cli`
+(unless explicitly asked by the user to forward a summary to
+Lark). If it is `source` (Lark / Feishu / external), use
+`lark-cli --as bot` per the rule above. The two rules are
+designed to be applied together — pick the outbound channel
+based on the inbound channel, and the `lark-cli` flag
+follows from the channel choice.
