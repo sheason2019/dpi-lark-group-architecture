@@ -75,3 +75,27 @@ check the inbound meta before picking a reply channel.
 
 This is the single source of truth for the rule; per-agent
 AGENTS.md should cross-reference it rather than redefine it.
+
+## `lark-cli` identity: always `--as bot` when replying to a user
+
+When the reply path is `lark-cli` (per the table above), the
+sending identity must be **bot**, never `user`. Concretely:
+
+- Use `lark-cli im +messages-send --as bot --user-id <open_id> --text "..."`.
+- Never pass `--as user` to send a message back to the Lark user
+  who originated the inbound message.
+
+Why this matters: `--as user` causes the message to land in
+the user's Lark app **as if they sent it to themselves**, which
+is confusing and can be mistaken for a different user (or for
+the user themselves) replying. It also loses the bot's
+identity, breaks the audit trail, and makes the conversation
+impossible to follow. Using `--as bot` keeps every reply
+attributable to the same entity (the d-pi bot app
+`cli_a91bf7a326b85bc8`), which is what the user expects when
+they send a message to the bot.
+
+Default behaviour of `lark-cli` is `--as user` (no flag = user
+identity), so the explicit `--as bot` flag must be passed every
+single time. Treat it as part of the canonical reply command,
+not an optional override.
